@@ -1,0 +1,45 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# 串行执行：同一时间只允许一个部署，避免并发冲突
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SSH Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            echo "=== Pulling latest code ==="
+            git fetch --all
+            git checkout main
+            git pull origin main
+
+            echo "=== Rebuilding and restarting containers ==="
+            docker compose pull || true
+            docker compose up -d --build --remove-orphans
+
+            echo "=== Waiting for health check ==="
+            sleep 15
+            curl -fsS http://localhost:8000/docs > /dev/null && echo "Service is healthy" || exit 1
+
+            echo "=== Cleaning up old images ==="
+            docker image prune -f
