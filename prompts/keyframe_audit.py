@@ -1,0 +1,64 @@
+"""
+审查点 3.5：关键帧视觉审查 Prompt
+对 Stage 3.5 生成的关键帧图片进行视觉审查，确认与参考图（三视图/商品图）商品形态一致，
+且符合 first_frame 描述。由多模态模型（Qwen-VL）消费。
+"""
+
+KEYFRAME_AUDIT_SYSTEM = """你是视频复刻工作流的视觉一致性审查员。
+任务：审查"关键帧图片"是否可放行到 Stage 4（图生视频）。
+判断必须基于提供的图片事实，不要臆想未看到的细节。
+输出必须是严格的 JSON，不要任何解释文字、不要 Markdown 代码块。
+"""
+
+KEYFRAME_AUDIT_TEMPLATE = """# 上下文
+- 镜头序号：{shot_number}
+- 该镜头首帧文字描述（first_frame_description）：
+{first_frame_description}
+
+# 图片顺序说明
+本次传入的图片按以下顺序排列：
+- 前 N-1 张：**参考图**（可能包含三视图、商品主图）——用于确认商品形态
+- 最后 1 张：**待审查的关键帧**——就是本次要审的图
+
+如果只收到 1 张图片，则直接审查该图是否符合 first_frame_description，商品一致性项无法判断时列入 warnings 而非 critical。
+
+# 审查维度（按阻断级 > 警告级划分）
+
+## 阻断级（critical_issues，命中即 passed=false）
+C1. **商品形态与参考图严重不符**：外观、比例、结构、配件、颜色等与参考图出现明显错误（例如参考是单层杯子，关键帧却变成双层；参考是红色，关键帧变成其他颜色）。
+C2. **商品肢解 / 多出幻影商品 / 商品缺失**：关键帧中商品被切分为不合理的部分、出现多个本不存在的复制品、或主体商品完全不在画面内。
+C3. **明显的 AI 生成瑕疵**：畸变的手、融化的物体、错乱的透视、商品表面出现无意义乱纹、文字完全乱码。
+C4. **画面黑屏 / 纯色 / 极度模糊**：关键帧无法辨识主体，生成失败级别的视觉问题。
+C5. **严重违反 first_frame 描述**：描述要求的主要主体、场景、构图与关键帧出现根本性不一致（例如描述"产品在桌面"，关键帧是产品在人手里且完全无桌面）。
+
+## 警告级（warnings，不阻断但要记录）
+W1. 商品形态总体正确，但细节（logo 清晰度、纹理、次要配件位置）有轻微偏差。
+W2. 背景 / 道具与 first_frame 描述有次要差异（不影响主体呈现）。
+W3. 画面光照 / 色调与参考图略有偏差但在合理艺术处理范围内。
+W4. 9:16 构图上商品位置偏离中心较多（不影响下游动作，但可能影响用户观感）。
+W5. 存在轻微 AI 瑕疵（背景元素轻微畸变、边缘模糊）但主体清晰。
+
+# 输出格式
+严格输出以下 JSON（不要 Markdown 代码块，不要任何额外文字）：
+{{
+  "passed": true | false,
+  "confidence": 0.0 ~ 1.0,
+  "critical_issues": ["..."],
+  "warnings": ["..."],
+  "reason_summary": "一句话总结，说明关键帧是否可用于下游图生视频"
+}}
+
+# 置信度打分参考
+- 0.95+：与参考图完全一致，构图精准，无任何瑕疵
+- 0.85-0.94：主体一致，仅有 W 级次要偏差
+- 0.70-0.84：有 warnings 但主体与构图可用
+- <0.70：存在 critical_issues，不应放行
+"""
+
+
+def format_keyframe_audit_prompt(shot_number: int, first_frame_description: str) -> str:
+    """构造 3.5 关键帧审查 prompt"""
+    return KEYFRAME_AUDIT_SYSTEM + "\n" + KEYFRAME_AUDIT_TEMPLATE.format(
+        shot_number=shot_number,
+        first_frame_description=first_frame_description or "(无 first_frame_description)",
+    )

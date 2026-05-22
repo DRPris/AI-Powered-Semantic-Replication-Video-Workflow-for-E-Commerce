@@ -1,0 +1,92 @@
+# =========================
+# Secrets / 环境变量
+# =========================
+.env
+.env.local
+.env.*.local
+*.env.bak
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.python-version
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 测试 / 类型检查 / Lint 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# =========================
+# 项目运行时产物
+# =========================
+tmp/
+archive/
+static/frames/
+scripts/output/
+
+# =========================
+# 日志
+# =========================
+*.log
+logs/
+nohup.out
+uvicorn.log
+
+# =========================
+# IDE / 编辑器
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =========================
+# 操作系统
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# 媒体生成产物
+# =========================
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.m4a
+
+# =========================
+# 3D / Blender 中间产物
+# =========================
+*.glb
+*.gltf
+*.blend
+*.blend1
+
+# =========================
+# 其他
+# =========================
+n8n-credentials.json

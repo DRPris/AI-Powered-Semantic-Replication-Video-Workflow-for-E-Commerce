@@ -1,0 +1,56 @@
+# 构建期忽略：减小镜像体积、避免敏感文件进入镜像层
+# =====================================================================
+
+# 敏感
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 项目运行时产物
+tmp/*
+!tmp/.gitkeep
+archive/
+static/frames/*
+!static/frames/.gitkeep
+scripts/output/*
+!scripts/output/.gitkeep
+
+# 日志
+*.log
+nohup.out
+uvicorn.log
+
+# git / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# CI
+.github/
+
+# 文档（按需，CI 镜像可不带）
+*.md
+!README.md
+LICENSE
+
+# Docker 自身
+Dockerfile
+docker-compose.yml
+.dockerignore

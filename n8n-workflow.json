@@ -1,0 +1,1408 @@
+{
+  "name": "视频语义复刻工作流",
+  "nodes": [
+    {
+      "id": "webhook-start",
+      "name": "Webhook触发器",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "start-video-replication",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "start-video-replication",
+        "responseMode": "onReceived",
+        "responseData": "allEntries",
+        "options": {}
+      }
+    },
+    {
+      "id": "start-workflow",
+      "name": "启动工作流",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        450,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/v1/start-workflow",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "project_id": "={{ $json.body.project_id || $json.body.project_name }}",
+          "video_url": "={{ $json.body.video_url }}",
+          "product_image_url": "={{ $json.body.product_image_url }}",
+          "mode": "={{ $json.body.mode || 'full' }}"
+        },
+        "options": {
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "wait-stage1",
+      "name": "等待阶段一完成",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ],
+      "parameters": {
+        "resume": "afterTimeInterval",
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "webhookId": "wait-stage1-resume"
+    },
+    {
+      "id": "generate-script",
+      "name": "生成复刻脚本",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        850,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/v1/generate-script",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "project_id": "={{ $('启动工作流').item.json.project_id }}"
+        },
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "convert-prompts",
+      "name": "转换提示词",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1050,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/v1/convert-prompts",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "project_id": "={{ $('启动工作流').item.json.project_id }}"
+        },
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "loop-prompt-review-init",
+      "name": "初始化提示词审核轮询",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        1250,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": 288,
+              "type": "number"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $('启动工作流').item.json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "loop-prompt-review",
+      "name": "提示词审核轮询",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1450,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-prompt-review",
+      "name": "等待5分钟-提示词审核",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        300
+      ],
+      "parameters": {
+        "resume": "afterTimeInterval",
+        "amount": 5,
+        "unit": "minutes"
+      },
+      "webhookId": "wait-prompt-review-resume"
+    },
+    {
+      "id": "check-prompt-status",
+      "name": "查询提示词审核状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1850,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:8000/api/v1/project/{{ $json.project_id }}/review-status",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "review_type",
+              "value": "prompt"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "if-prompt-approved",
+      "name": "提示词审核通过",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2050,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.all_approved }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-prompt-loop",
+      "name": "增加提示词轮询计数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        1850,
+        500
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": "={{ $json.loop_count + 1 }}",
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": "={{ $json.max_loops }}",
+              "type": "number"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "check-prompt-timeout",
+      "name": "检查提示词轮询超时",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2050,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.loop_count }}",
+              "rightValue": "={{ $json.max_loops }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "notify-prompt-timeout",
+      "name": "提示词审核超时通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        600
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "generate-shots",
+      "name": "生成分镜视频",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2250,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/v1/generate-shots",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "project_id": "={{ $('启动工作流').item.json.project_id }}"
+        },
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "loop-video-gen-init",
+      "name": "初始化视频生成轮询",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        2450,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": 360,
+              "type": "number"
+            },
+            {
+              "name": "job_id",
+              "value": "={{ $('生成分镜视频').item.json.job_id }}",
+              "type": "string"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $('启动工作流').item.json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "loop-video-gen",
+      "name": "视频生成轮询",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2650,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-video-gen",
+      "name": "等待2分钟-视频生成",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        2850,
+        300
+      ],
+      "parameters": {
+        "resume": "afterTimeInterval",
+        "amount": 2,
+        "unit": "minutes"
+      },
+      "webhookId": "wait-video-gen-resume"
+    },
+    {
+      "id": "check-video-status",
+      "name": "查询视频生成状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        3050,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:8000/api/v1/generation-status/{{ $json.job_id }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "if-video-completed",
+      "name": "视频生成完成",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-video-loop",
+      "name": "增加视频生成轮询计数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        3050,
+        500
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": "={{ $json.loop_count + 1 }}",
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": "={{ $json.max_loops }}",
+              "type": "number"
+            },
+            {
+              "name": "job_id",
+              "value": "={{ $json.job_id }}",
+              "type": "string"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "check-video-timeout",
+      "name": "检查视频生成超时",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.loop_count }}",
+              "rightValue": "={{ $json.max_loops }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "notify-video-gen-timeout",
+      "name": "视频生成超时通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3450,
+        600
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "loop-video-review-init",
+      "name": "初始化视频审核轮询",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        3450,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": 288,
+              "type": "number"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "loop-video-review",
+      "name": "视频审核轮询",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        3650,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-video-review",
+      "name": "等待5分钟-视频审核",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        3850,
+        300
+      ],
+      "parameters": {
+        "resume": "afterTimeInterval",
+        "amount": 5,
+        "unit": "minutes"
+      },
+      "webhookId": "wait-video-review-resume"
+    },
+    {
+      "id": "check-video-review-status",
+      "name": "查询视频审核状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4050,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:8000/api/v1/project/{{ $json.project_id }}/review-status",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "review_type",
+              "value": "video"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "if-video-approved",
+      "name": "视频审核通过",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4250,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.all_approved }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-video-review-loop",
+      "name": "增加视频审核轮询计数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        4050,
+        500
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": "={{ $json.loop_count + 1 }}",
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": "={{ $json.max_loops }}",
+              "type": "number"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "check-video-review-timeout",
+      "name": "检查视频审核超时",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4250,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.loop_count }}",
+              "rightValue": "={{ $json.max_loops }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "notify-video-review-timeout",
+      "name": "视频审核超时通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        4450,
+        600
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "compose-video",
+      "name": "合成视频",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4450,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/v1/compose-video",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "project_id": "={{ $json.project_id }}"
+        },
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "loop-compose-init",
+      "name": "初始化合成轮询",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        4650,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": 120,
+              "type": "number"
+            },
+            {
+              "name": "job_id",
+              "value": "={{ $('合成视频').item.json.job_id }}",
+              "type": "string"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "loop-compose",
+      "name": "合成轮询",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        4850,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-compose",
+      "name": "等待1分钟-合成",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        5050,
+        300
+      ],
+      "parameters": {
+        "resume": "afterTimeInterval",
+        "amount": 1,
+        "unit": "minutes"
+      },
+      "webhookId": "wait-compose-resume"
+    },
+    {
+      "id": "check-compose-status",
+      "name": "查询合成状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        5250,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:8000/api/v1/compose-status/{{ $json.job_id }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "if-compose-completed",
+      "name": "合成完成",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5450,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-compose-loop",
+      "name": "增加合成轮询计数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        5250,
+        500
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "loop_count",
+              "value": "={{ $json.loop_count + 1 }}",
+              "type": "number"
+            },
+            {
+              "name": "max_loops",
+              "value": "={{ $json.max_loops }}",
+              "type": "number"
+            },
+            {
+              "name": "job_id",
+              "value": "={{ $json.job_id }}",
+              "type": "string"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "check-compose-timeout",
+      "name": "检查合成超时",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5450,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.loop_count }}",
+              "rightValue": "={{ $json.max_loops }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "notify-compose-timeout",
+      "name": "合成超时通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        5650,
+        600
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "completion-notification",
+      "name": "完成通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        5650,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "slack-notification",
+      "name": "Slack通知",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [
+        5850,
+        300
+      ],
+      "parameters": {
+        "channel": "={{ $env.SLACK_CHANNEL_ID }}",
+        "text": "✅ 视频复刻工作流已完成！\n\n项目ID: {{ $json.project_id }}\n最终视频: {{ $json.result?.final_video_url || '查看详情' }}",
+        "otherOptions": {},
+        "attachments": []
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "id": "video-replication",
+      "name": "视频复刻"
+    }
+  ],
+  "connections": {
+    "Webhook触发器": {
+      "main": [
+        [
+          {
+            "node": "启动工作流",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "启动工作流": {
+      "main": [
+        [
+          {
+            "node": "等待阶段一完成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待阶段一完成": {
+      "main": [
+        [
+          {
+            "node": "生成复刻脚本",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "生成复刻脚本": {
+      "main": [
+        [
+          {
+            "node": "转换提示词",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "转换提示词": {
+      "main": [
+        [
+          {
+            "node": "初始化提示词审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "初始化提示词审核轮询": {
+      "main": [
+        [
+          {
+            "node": "提示词审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提示词审核轮询": {
+      "main": [
+        [
+          {
+            "node": "等待5分钟-提示词审核",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待5分钟-提示词审核": {
+      "main": [
+        [
+          {
+            "node": "查询提示词审核状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询提示词审核状态": {
+      "main": [
+        [
+          {
+            "node": "提示词审核通过",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提示词审核通过": {
+      "main": [
+        [
+          {
+            "node": "生成分镜视频",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "增加提示词轮询计数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "增加提示词轮询计数": {
+      "main": [
+        [
+          {
+            "node": "检查提示词轮询超时",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查提示词轮询超时": {
+      "main": [
+        [
+          {
+            "node": "提示词审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "提示词审核超时通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "生成分镜视频": {
+      "main": [
+        [
+          {
+            "node": "初始化视频生成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "初始化视频生成轮询": {
+      "main": [
+        [
+          {
+            "node": "视频生成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "视频生成轮询": {
+      "main": [
+        [
+          {
+            "node": "等待2分钟-视频生成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待2分钟-视频生成": {
+      "main": [
+        [
+          {
+            "node": "查询视频生成状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询视频生成状态": {
+      "main": [
+        [
+          {
+            "node": "视频生成完成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "视频生成完成": {
+      "main": [
+        [
+          {
+            "node": "初始化视频审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "增加视频生成轮询计数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "增加视频生成轮询计数": {
+      "main": [
+        [
+          {
+            "node": "检查视频生成超时",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查视频生成超时": {
+      "main": [
+        [
+          {
+            "node": "视频生成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "视频生成超时通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "初始化视频审核轮询": {
+      "main": [
+        [
+          {
+            "node": "视频审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "视频审核轮询": {
+      "main": [
+        [
+          {
+            "node": "等待5分钟-视频审核",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待5分钟-视频审核": {
+      "main": [
+        [
+          {
+            "node": "查询视频审核状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询视频审核状态": {
+      "main": [
+        [
+          {
+            "node": "视频审核通过",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "视频审核通过": {
+      "main": [
+        [
+          {
+            "node": "合成视频",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "增加视频审核轮询计数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "增加视频审核轮询计数": {
+      "main": [
+        [
+          {
+            "node": "检查视频审核超时",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查视频审核超时": {
+      "main": [
+        [
+          {
+            "node": "视频审核轮询",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "视频审核超时通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "合成视频": {
+      "main": [
+        [
+          {
+            "node": "初始化合成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "初始化合成轮询": {
+      "main": [
+        [
+          {
+            "node": "合成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "合成轮询": {
+      "main": [
+        [
+          {
+            "node": "等待1分钟-合成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待1分钟-合成": {
+      "main": [
+        [
+          {
+            "node": "查询合成状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询合成状态": {
+      "main": [
+        [
+          {
+            "node": "合成完成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "合成完成": {
+      "main": [
+        [
+          {
+            "node": "完成通知",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "增加合成轮询计数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "增加合成轮询计数": {
+      "main": [
+        [
+          {
+            "node": "检查合成超时",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查合成超时": {
+      "main": [
+        [
+          {
+            "node": "合成轮询",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "合成超时通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "完成通知": {
+      "main": [
+        [
+          {
+            "node": "Slack通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
