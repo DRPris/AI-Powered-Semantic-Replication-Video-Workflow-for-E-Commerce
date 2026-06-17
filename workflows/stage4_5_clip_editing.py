@@ -27,6 +27,7 @@ from config import settings
 from agents.clip_editor_agent import ClipEditorAgent
 from services.airtable_service import AirtableService
 from services.ffmpeg_service import FFmpegService
+from services.gemini_service import GeminiService
 from services.oss_service import OSSService
 
 logger = logging.getLogger(__name__)
@@ -103,18 +104,27 @@ async def run_clip_editing(
             f"[Stage 4.5] 项目 {project_id} 未找到节奏分析数据，将使用默认时长兜底"
         )
 
-    # 4. 并发探测每个生成 clip 的时长
-    source_durations = await _probe_source_durations(
+    # 4. 并发探测每个生成 clip 的时长（启用语义选段时同时保留字节）
+    clip_results = await _probe_and_load_clips(
         approved_shots=approved_shots,
         project_id=project_id,
         oss=oss,
         ffmpeg=ffmpeg,
+        keep_bytes=enable_llm_semantic_pick,
+    )
+    source_durations = [r[0] for r in clip_results]
+    clip_bytes_list: list[Optional[bytes]] = (
+        [r[1] for r in clip_results] if enable_llm_semantic_pick else None
     )
 
     # 5. 调用 Agent 规划
+    gemini = GeminiService() if enable_llm_semantic_pick else None
+    if gemini:
+        gemini.set_context(project_id, "stage4_5")
     agent = ClipEditorAgent(
         rhythm_analysis=rhythm_analysis,
         video_analysis=video_analysis,
+        gemini_service=gemini,
         enable_llm_semantic_pick=enable_llm_semantic_pick,
         enable_speed_adjust=enable_speed_adjust,
     )
@@ -122,20 +132,26 @@ async def run_clip_editing(
         approved_shots=approved_shots,
         source_durations=source_durations,
         project_id=project_id,
+        clip_video_bytes_list=clip_bytes_list,
     )
 
-    # 6. 写回 Airtable
+    # 6. 写回 Airtable（含剪辑审核状态）
     airtable_write_count = 0
     for shot, plan in zip(approved_shots, response.edit_plans):
         shot_id = shot.get("id")
         if not shot_id:
             continue
+        # 语义选段策略需人工审核，其它策略自动通过
+        review_status = (
+            "待审核" if plan.strategy == "trim_semantic" else "已通过"
+        )
         try:
             ok = await airtable.update_shot_edit_plan(
                 shot_id=shot_id,
                 edit_plan=plan.model_dump(),
                 source_duration=plan.source_duration,
                 target_duration=plan.target_duration,
+                edit_review_status=review_status,
             )
             if ok:
                 airtable_write_count += 1
@@ -157,22 +173,27 @@ async def run_clip_editing(
     return result
 
 
-async def _probe_source_durations(
+async def _probe_and_load_clips(
     approved_shots: list[dict],
     project_id: str,
     oss: OSSService,
     ffmpeg: FFmpegService,
-) -> list[float]:
-    """并发下载每个镜头的 clip 并探测实际时长。
+    keep_bytes: bool = False,
+) -> list[tuple[float, Optional[bytes]]]:
+    """并发下载每个镜头的 clip，探测实际时长。
 
-    使用 OSS 签名 URL 下载到 tmp/clip_probe_{N}.mp4，探测完立即删除。
+    当 keep_bytes=True 时保留字节数据供 Phase 2 语义选段使用，
+    否则探测完立即删除（与原 _probe_source_durations 行为一致）。
+
+    Returns:
+        list[tuple[float, Optional[bytes]]]: 每个元素为 (duration, video_bytes_or_None)
     """
     temp_dir = Path(settings.FFMPEG_TEMP_DIR) / "clip_probe"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     sem = asyncio.Semaphore(3)  # 最多 3 并发下载
 
-    async def _probe_one(idx: int, shot: dict) -> float:
+    async def _probe_one(idx: int, shot: dict) -> tuple[float, Optional[bytes]]:
         shot_fields = shot.get("fields", {}) or {}
         shot_number = int(shot_fields.get("镜头序号", idx + 1) or (idx + 1))
         oss_key = f"videos/{project_id}/shot_{shot_number}.mp4"
@@ -182,7 +203,7 @@ async def _probe_source_durations(
                 url = oss.get_signed_url(oss_key, expires=3600)
             except Exception as e:
                 logger.warning(f"[Stage 4.5] 镜头 {shot_number} 生成 OSS URL 失败: {e}")
-                return 0.0
+                return (0.0, None)
 
             tmp_path = temp_dir / f"probe_{project_id}_{shot_number}.mp4"
             try:
@@ -192,12 +213,13 @@ async def _probe_source_durations(
                 ) as client:
                     resp = await client.get(url)
                     resp.raise_for_status()
-                    tmp_path.write_bytes(resp.content)
+                    file_bytes = resp.content
+                    tmp_path.write_bytes(file_bytes)
                 duration = await ffmpeg._get_video_duration(str(tmp_path))
-                return float(duration or 0.0)
+                return (float(duration or 0.0), file_bytes if keep_bytes else None)
             except Exception as e:
                 logger.warning(f"[Stage 4.5] 镜头 {shot_number} 探测时长失败: {e}")
-                return 0.0
+                return (0.0, None)
             finally:
                 try:
                     if tmp_path.exists():
@@ -205,14 +227,14 @@ async def _probe_source_durations(
                 except OSError:
                     pass
 
-    durations = await asyncio.gather(
+    results = await asyncio.gather(
         *[_probe_one(i, s) for i, s in enumerate(approved_shots)]
     )
 
     logger.info(
-        f"[Stage 4.5] 探测镜头时长: {[f'{d:.2f}s' for d in durations]}"
+        f"[Stage 4.5] 探测镜头时长: {[f'{r[0]:.2f}s' for r in results]}"
     )
-    return list(durations)
+    return list(results)
 
 
 # 对外暴露的别名，保持与其它 stage 命名一致

@@ -38,6 +38,7 @@ class AirtableService:
     SHOT_EDIT_PLAN_FIELD = "剪辑指令"             # Long text（JSON）
     SHOT_SRC_DURATION_FIELD = "原镜头时长"         # Number
     SHOT_TARGET_DURATION_FIELD = "目标时长"       # Number
+    SHOT_EDIT_REVIEW_STATUS_FIELD = "剪辑审核状态"  # Single Select: 待审核/已通过/已驳回
 
     # 统一模型审查层字段（用户需在 Airtable 手动建字段，缺失时降级为警告，不阻塞）
     # Projects 表：
@@ -48,6 +49,7 @@ class AirtableService:
     # Shots 表：
     SHOT_KEYFRAME_AUDIT_STATUS_FIELD = "关键帧审查状态"        # Single Select
     SHOT_KEYFRAME_AUDIT_COMMENT_FIELD = "关键帧审查意见"       # Long text
+    SHOT_KEYFRAME_AUDIT_ATTEMPT_FIELD = "关键帧审查尝试次数"   # Number（级联重试使用，缺失则跳过）
 
     def __init__(self, api_key: str, base_id: str) -> None:
         """
@@ -221,8 +223,11 @@ class AirtableService:
         try:
             clarifications = brief.get("clarification_items") or []
             data: dict[str, Any] = {
-                self.BRIEF_DRAFT_FIELD: _json.dumps(brief, ensure_ascii=False)[:90000],
-                self.BRIEF_CLARIFICATION_FIELD: _json.dumps(clarifications, ensure_ascii=False)[:90000],
+                # 阈值说明：Airtable Long Text 实际容量远大于 90KB，
+                # 对齐 _truncate_content 默认阈值上调到 200000 字符，
+                # 避免复杂产品 Brief 草稿被过度截断。
+                self.BRIEF_DRAFT_FIELD: _json.dumps(brief, ensure_ascii=False)[:200000],
+                self.BRIEF_CLARIFICATION_FIELD: _json.dumps(clarifications, ensure_ascii=False)[:200000],
                 self.BRIEF_CONFIDENCE_FIELD: float(brief.get("confidence_score", 0.0)),
             }
             await asyncio.to_thread(self._projects.update, project_id, data)
@@ -287,7 +292,8 @@ class AirtableService:
         import json as _json
         try:
             data = {
-                self.BRIEF_DRAFT_FIELD: _json.dumps(brief, ensure_ascii=False)[:90000],
+                # 同 save_product_brief_draft，上调阈值到 200000 字符。
+                self.BRIEF_DRAFT_FIELD: _json.dumps(brief, ensure_ascii=False)[:200000],
                 self.BRIEF_CLARIFICATION_FIELD: "",
                 self.BRIEF_CONFIDENCE_FIELD: float(brief.get("confidence_score", 0.0)),
             }
@@ -353,6 +359,44 @@ class AirtableService:
             content=data.get("content", ""),
             attachment_url=data.get("attachment_url", ""),
         )
+
+    async def update_asset_content(
+        self,
+        project_id: str,
+        asset_type: str,
+        content: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        更新指定项目+素材类型的素材内容字段
+
+        找到第一条匹配的记录并更新其 "内容" 字段。
+        """
+        try:
+            records = await asyncio.to_thread(self._assets.all)
+            target = None
+            for r in records:
+                fields = r.get("fields", {})
+                if (
+                    project_id in fields.get("项目", [])
+                    and fields.get("素材类型", "") == asset_type
+                ):
+                    target = r
+                    break
+            if not target:
+                logger.warning(f"update_asset_content: 未找到 {project_id}/{asset_type}，fallback to create")
+                return await self.create_asset(
+                    project_id=project_id,
+                    asset_type=asset_type,
+                    content=content,
+                )
+            record = await asyncio.to_thread(
+                self._assets.update, target["id"], {"内容": content}
+            )
+            logger.info(f"更新素材内容: {target['id']} - 类型: {asset_type}")
+            return record
+        except (HTTPError, Exception) as e:
+            logger.error(f"更新素材内容失败: {e}")
+            raise
 
     async def get_project_assets(self, project_id: str) -> list[dict[str, Any]]:
         """
@@ -676,6 +720,7 @@ class AirtableService:
         edit_plan: dict,
         source_duration: Optional[float] = None,
         target_duration: Optional[float] = None,
+        edit_review_status: Optional[str] = None,
     ) -> bool:
         """写入复刻剪辑 Agent 产出的 edit_plan 到 Shots 表。
 
@@ -695,6 +740,8 @@ class AirtableService:
             candidate_fields[self.SHOT_SRC_DURATION_FIELD] = float(source_duration)
         if target_duration is not None:
             candidate_fields[self.SHOT_TARGET_DURATION_FIELD] = float(target_duration)
+        if edit_review_status:
+            candidate_fields[self.SHOT_EDIT_REVIEW_STATUS_FIELD] = edit_review_status
 
         async def _try(fields: dict[str, Any]) -> bool:
             try:
@@ -792,13 +839,15 @@ class AirtableService:
         shot_id: str,
         status: str,
         review_comment: str = "",
+        attempt: Optional[int] = None,
     ) -> bool:
         """写回 Stage 3.5 关键帧审查结果到 Shots 表。
 
         Args:
             shot_id: 分镜 ID
-            status: "待审核" / "已通过" / "已驳回"
+            status: "待审核" / "已通过" / "已驳回" / "待人审"
             review_comment: 审查意见
+            attempt: 当前尝试次数（级联重试使用，可选；字段缺失时自动跳过该项）
 
         字段缺失时降级为警告，不阻塞。
         """
@@ -807,6 +856,8 @@ class AirtableService:
         }
         if review_comment:
             candidate_fields[self.SHOT_KEYFRAME_AUDIT_COMMENT_FIELD] = review_comment
+        if attempt is not None:
+            candidate_fields[self.SHOT_KEYFRAME_AUDIT_ATTEMPT_FIELD] = int(attempt)
 
         async def _try(fields: dict[str, Any]) -> bool:
             try:

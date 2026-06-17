@@ -313,6 +313,20 @@ async def run_stage5(
                     continue
 
                 strategy = plan_dict.get("strategy", "no_op")
+
+                # Phase 2 门控：语义选段策略需检查剪辑审核状态
+                if strategy == "trim_semantic":
+                    review_status = shot_fields.get("剪辑审核状态", "")
+                    if review_status != "已通过":
+                        # 降级为 trim_head: 从头裁剪到 target_duration
+                        target_dur = plan_dict.get("target_duration", 5.0)
+                        plan_dict["strategy"] = "trim_head"
+                        plan_dict["trim"] = {"start_sec": 0.0, "end_sec": target_dur}
+                        strategy = "trim_head"
+                        logger.info(
+                            f"镜头 {i+1} 语义选段未批准 (状态={review_status})，降级 trim_head"
+                        )
+
                 if strategy == "no_op":
                     edit_plan_applied[i] = True  # 标记为已处理，跳过旧裁剪
                     continue

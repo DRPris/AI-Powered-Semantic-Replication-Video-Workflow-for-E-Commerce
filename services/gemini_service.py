@@ -26,6 +26,7 @@ from prompts.script_replication import format_script_replication_prompt
 from prompts.prompt_conversion import format_prompt_conversion
 from prompts.product_listing_extraction import format_product_listing_extraction_prompt
 from prompts.action_compatibility import format_action_compatibility_prompt
+from prompts.clip_editing import format_clip_semantic_pick_prompt
 from prompts.script_validation import format_script_validation_prompt
 from prompts.script_fix import format_script_fix_prompt
 from prompts.shot_prompt_audit import format_shot_prompt_audit_prompt
@@ -115,6 +116,71 @@ class GeminiService:
     async def close(self) -> None:
         """无需清理 (使用无状态 requests 调用)"""
         pass
+
+    # ------------------------------------------------------------------
+    # 统一审查层二级精审：Gemini 多模态关键帧审查
+    # ------------------------------------------------------------------
+    async def audit_keyframe_images(
+        self,
+        image_urls: list[str],
+        prompt: str,
+        context: str = "keyframe_audit_l2",
+        temperature: float = 0.1,
+    ) -> dict[str, Any]:
+        """L2 精审：使用 Gemini 对关键帧进行审查。
+
+        与 QwenService.audit_images 输出结构完全一致：
+            {passed, confidence, critical_issues, warnings, reason_summary}
+
+        调用/解析异常时一律返回 passed=False, confidence=0.0（失败即转人审）。
+
+        Args:
+            image_urls: 参考图 + 待审查图的 URL 列表（顺序与 L1一致，最后一张为待审查）
+            prompt: 审查 prompt（复用 prompts/keyframe_audit.format_keyframe_audit_prompt）
+            context: token 追踪上下文标识
+            temperature: 审查场景低温度避免随机波动
+        """
+        model_name = getattr(settings, "GEMINI_AUDIT_MODEL", None) or "gemini-2.5-pro"
+
+        try:
+            # 依次下载图片并转为 inline_data，与现有多模态接口一致
+            parts: list[dict[str, Any]] = []
+            for url in image_urls or []:
+                if not url:
+                    continue
+                # 默认 jpeg；PNG 也能被 Gemini 接受（mime 在审查场景下并不严格检查）
+                mime = "image/png" if url.lower().split("?")[0].endswith(".png") else "image/jpeg"
+                parts.append(await self._download_as_base64(url, mime))
+            parts.append({"text": prompt})
+
+            contents = [{"role": "user", "parts": parts}]
+
+            response = await self._generate_content(
+                contents=contents,
+                model=model_name,
+                generation_config={
+                    "temperature": temperature,
+                    "responseMimeType": "application/json",
+                },
+                context=context,
+            )
+            text = self._extract_text_from_response(response)
+
+            # 复用 QwenService 的 JSON 解析与安全归一化，避免重复逻辑
+            from services.qwen_service import QwenService
+            data = QwenService._parse_json(text)
+            if not isinstance(data, dict):
+                raise ValueError(f"audit_keyframe_images returned non-dict: {data!r}")
+            return QwenService._normalize_audit_result(data)
+        except Exception as e:
+            logger.warning(f"Gemini audit_keyframe_images failed [{context}]: {e}")
+            return {
+                "passed": False,
+                "confidence": 0.0,
+                "critical_issues": [f"审查调用异常: {type(e).__name__}: {e}"],
+                "warnings": [],
+                "reason_summary": "Gemini 精审调用失败，自动转人审",
+            }
 
     async def _download_as_base64(self, url: str, mime_type: str) -> dict[str, Any]:
         """
@@ -380,7 +446,10 @@ class GeminiService:
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents, context="video_analysis")
+            response = await self._generate_content(
+                contents, context="video_analysis",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             logger.info("Video analysis completed, parsing response...")
 
@@ -451,7 +520,10 @@ class GeminiService:
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents, context="rhythm_analysis")
+            response = await self._generate_content(
+                contents, context="rhythm_analysis",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             logger.info("Rhythm analysis completed, parsing response...")
 
@@ -511,7 +583,10 @@ class GeminiService:
                 }
             ]
 
-            response = await self._generate_content(contents, context="rhythm_analysis_upload")
+            response = await self._generate_content(
+                contents, context="rhythm_analysis_upload",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             logger.info("Rhythm analysis (from bytes) completed, parsing response...")
 
@@ -532,6 +607,92 @@ class GeminiService:
         except Exception as e:
             logger.error(f"Unexpected error during rhythm analysis (bytes): {e}")
             raise
+
+    async def semantic_clip_pick(
+        self,
+        video_bytes: bytes,
+        shot_number: int,
+        source_duration: float,
+        target_duration: float,
+        original_duration: float,
+        action_description: str,
+        pace: str = "medium",
+        visual_anchors: str = "",
+    ) -> dict[str, Any]:
+        """Phase 2 语义选段：从生成 clip 中挑选与原镜头动作最贴合的连续时间窗。
+
+        将生成 clip 视频字节 + 原镜头语义摘要发送给 Gemini，让其输出
+        best_window(start_sec/end_sec) + semantic_anchors + confidence。
+
+        Args:
+            video_bytes: 生成 clip 的原始字节
+            shot_number: 镜头序号
+            source_duration: 生成 clip 实际时长（秒）
+            target_duration: 目标裁剪时长（秒）
+            original_duration: 原视频该镜头时长（秒）
+            action_description: 原镜头动作描述
+            pace: 原镜头节奏 (slow/medium/fast)
+            visual_anchors: 关键视觉锚点描述
+
+        Returns:
+            {"best_window": {"start_sec": ..., "end_sec": ...},
+             "semantic_anchors": [...], "confidence": 0.85, "reasoning": "..."}
+
+        Raises:
+            ValueError: JSON 解析失败
+        """
+        logger.info(
+            f"[SemanticClipPick] 镜头 {shot_number}: "
+            f"source={source_duration:.2f}s, target={target_duration:.2f}s, "
+            f"original={original_duration:.2f}s"
+        )
+
+        # 1. 视频字节 -> base64 inline_data
+        file_b64 = base64.b64encode(video_bytes).decode("utf-8")
+        video_part = {"inline_data": {"mime_type": "video/mp4", "data": file_b64}}
+
+        # 2. 构建 prompt
+        prompt_text = format_clip_semantic_pick_prompt(
+            shot_number=shot_number,
+            source_duration=source_duration,
+            target_duration=target_duration,
+            original_duration=original_duration,
+            action_description=action_description,
+            pace=pace,
+            visual_anchors=visual_anchors,
+        )
+
+        # 3. 调用 Gemini
+        contents = [
+            {
+                "role": "user",
+                "parts": [
+                    video_part,
+                    {"text": prompt_text},
+                ],
+            }
+        ]
+
+        response = await self._generate_content(
+            contents,
+            model=self.model_name,
+            context=f"clip_semantic_pick_shot{shot_number}",
+            generation_config={
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+            },
+        )
+
+        text = self._extract_text_from_response(response)
+        result = self._parse_structured_output(text)
+
+        confidence = float(result.get("confidence", 0.0))
+        window = result.get("best_window", {})
+        logger.info(
+            f"[SemanticClipPick] 镜头 {shot_number} 结果: "
+            f"window={window}, confidence={confidence:.2f}"
+        )
+        return result
 
     async def extract_product_listing(self, listing_url: str, use_cache: bool = True) -> Optional[dict[str, Any]]:
         """
@@ -596,7 +757,10 @@ class GeminiService:
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents, context="product_listing_extraction")
+            response = await self._generate_content(
+                contents, context="product_listing_extraction",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
@@ -900,7 +1064,10 @@ class GeminiService:
                     ],
                 }
             ]
-            response = await self._generate_content(contents, context="product_video_analysis")
+            response = await self._generate_content(
+                contents, context="product_video_analysis",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
 
@@ -958,7 +1125,10 @@ class GeminiService:
                 }
             ]
 
-            response = await self._generate_content(contents, context="action_compatibility_check")
+            response = await self._generate_content(
+                contents, context="action_compatibility_check",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
@@ -1027,7 +1197,10 @@ class GeminiService:
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents, context="product_analysis")
+            response = await self._generate_content(
+                contents, context="product_analysis",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_ANALYSIS},
+            )
 
             logger.info("Product analysis completed, parsing response...")
 
@@ -1298,7 +1471,10 @@ Output all three images in 9:16 portrait format."""
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents)
+            response = await self._generate_content(
+                contents, context="script_generation",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_CREATIVE},
+            )
 
             logger.info("Script generation completed, parsing response...")
 
@@ -1403,7 +1579,10 @@ Output all three images in 9:16 portrait format."""
                 "parts": [{"text": correction_text}],
             })
 
-            response = await self._generate_content(contents)
+            response = await self._generate_content(
+                contents, context="script_generation_retry",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_CREATIVE},
+            )
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
             current_count = len(result.get("shots", []))
@@ -1474,7 +1653,10 @@ Output all three images in 9:16 portrait format."""
             ]
 
             # 调用 Gemini API
-            response = await self._generate_content(contents)
+            response = await self._generate_content(
+                contents, context="prompt_conversion",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_CREATIVE},
+            )
 
             logger.info("Prompt conversion completed, parsing response...")
 
@@ -1497,15 +1679,17 @@ Output all three images in 9:16 portrait format."""
         self,
         script_result: dict[str, Any],
         product_listing_info: Optional[dict[str, Any]] = None,
-        video_analysis: Optional[dict[str, Any]] = None
+        video_analysis: Optional[dict[str, Any]] = None,
+        product_analysis: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """
-        自动验证生成的复刻脚本，检查镜头重复、功能虚构、卖点覆盖等问题
+        自动验证生成的复刻脚本，检查镜头重复、功能虚构、卖点覆盖、forced_change 合法性等问题
 
         Args:
             script_result: 生成的脚本 dict
             product_listing_info: 商品详情页提取信息（可选）
             video_analysis: 原视频分析结果（可选）
+            product_analysis: 商品属性分析（GROUND TRUTH，用于 forced_change 合法性检查）
 
         Returns:
             验证结果 dict，包含 passed, confidence, issues
@@ -1516,11 +1700,13 @@ Output all three images in 9:16 portrait format."""
             script_str = json.dumps(script_result, ensure_ascii=False, indent=2)
             listing_str = json.dumps(product_listing_info, ensure_ascii=False, indent=2) if product_listing_info else ""
             video_str = json.dumps(video_analysis, ensure_ascii=False, indent=2) if video_analysis else ""
+            analysis_str = json.dumps(product_analysis, ensure_ascii=False, indent=2) if product_analysis else ""
 
             prompt = format_script_validation_prompt(
                 script_result=script_str,
                 product_listing_info=listing_str,
-                video_analysis=video_str
+                video_analysis=video_str,
+                product_analysis=analysis_str,
             )
 
             contents = [
@@ -1530,7 +1716,10 @@ Output all three images in 9:16 portrait format."""
                 }
             ]
 
-            response = await self._generate_content(contents, context="script_validation")
+            response = await self._generate_content(
+                contents, context="script_validation",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_AUDIT},
+            )
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
 
@@ -1597,7 +1786,10 @@ Output all three images in 9:16 portrait format."""
                 }
             ]
 
-            response = await self._generate_content(contents, context="shot_prompt_audit")
+            response = await self._generate_content(
+                contents, context="shot_prompt_audit",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_AUDIT},
+            )
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
 
@@ -1671,7 +1863,10 @@ Output all three images in 9:16 portrait format."""
                 }
             ]
 
-            response = await self._generate_content(contents, context="script_fix")
+            response = await self._generate_content(
+                contents, context="script_fix",
+                generation_config={"temperature": settings.GEMINI_TEMPERATURE_CREATIVE},
+            )
             text = self._extract_text_from_response(response)
             result = self._parse_structured_output(text)
 

@@ -85,6 +85,7 @@ class ClipEditorAgent:
         approved_shots: list[dict],
         source_durations: list[float],
         project_id: str = "",
+        clip_video_bytes_list: Optional[list[Optional[bytes]]] = None,
     ) -> ClipEditorResponse:
         """为每个镜头规划 edit_plan。
 
@@ -92,6 +93,8 @@ class ClipEditorAgent:
             approved_shots: 审核通过的镜头（从 Airtable 获取），按镜头序号排序
             source_durations: 每个生成 clip 的实际时长（秒），与 approved_shots 一一对应
             project_id: 项目 ID，仅用于日志
+            clip_video_bytes_list: 每个生成 clip 的字节数据（Phase 2 语义选段用），
+                                  与 approved_shots 一一对应，None 则不启用语义选段
         """
         total = len(approved_shots)
         if len(source_durations) != total:
@@ -118,10 +121,16 @@ class ClipEditorAgent:
                 continue
 
             try:
+                clip_bytes = (
+                    clip_video_bytes_list[idx]
+                    if clip_video_bytes_list and idx < len(clip_video_bytes_list)
+                    else None
+                )
                 plan = await self._plan_single_shot(
                     shot_number=shot_number,
                     source_duration=src_dur,
                     target_duration=tgt_dur,
+                    clip_video_bytes=clip_bytes,
                 )
             except Exception as e:
                 logger.warning(
@@ -248,6 +257,7 @@ class ClipEditorAgent:
         shot_number: int,
         source_duration: float,
         target_duration: float,
+        clip_video_bytes: Optional[bytes] = None,
     ) -> EditPlan:
         """为单个镜头决定剪辑策略。"""
         delta = source_duration - target_duration
@@ -271,12 +281,13 @@ class ClipEditorAgent:
 
         # Case 3: source > target —— 需要裁剪
         # Phase 2: 若启用语义选段，优先调用 LLM
-        if self.enable_llm_semantic_pick and self.gemini:
+        if self.enable_llm_semantic_pick and self.gemini and clip_video_bytes:
             try:
                 semantic_plan = await self._semantic_pick_via_llm(
                     shot_number=shot_number,
                     source_duration=source_duration,
                     target_duration=target_duration,
+                    clip_video_bytes=clip_video_bytes,
                 )
                 if semantic_plan and semantic_plan.confidence >= 0.7:
                     return semantic_plan
@@ -340,18 +351,111 @@ class ClipEditorAgent:
         shot_number: int,
         source_duration: float,
         target_duration: float,
+        clip_video_bytes: bytes,
     ) -> Optional[EditPlan]:
         """Phase 2: 调用 Gemini 做语义选段，产出 trim_semantic 策略。
 
-        Phase 1 不会走到这里（enable_llm_semantic_pick=False）。
+        从 video_analysis 和 rhythm_analysis 提取原镜头语义信息，
+        将生成 clip 字节 + 语义摘要发送给 Gemini，输出最佳连续窗口。
         """
-        # Phase 2 实现占位：调用 prompts/clip_editing.CLIP_SEMANTIC_PICK_PROMPT
-        # 解析 best_window -> 构造 EditPlan(strategy=trim_semantic, trim=...)
-        # 目前返回 None 触发 trim_head 降级
-        logger.info(
-            f"[ClipEditorAgent] Phase 2 语义选段占位（镜头 {shot_number}），当前返回 None"
+        # 1. 从 video_analysis 提取原镜头的动作描述与视觉锚点
+        va_shots = (self.video_analysis or {}).get("shots") or []
+        action_description = ""
+        visual_anchors = ""
+        if shot_number - 1 < len(va_shots):
+            va_shot = va_shots[shot_number - 1] or {}
+            action = va_shot.get("action") or {}
+            # 拼接 person_hand + product 作为动作描述
+            parts = []
+            if action.get("person_hand"):
+                parts.append(action["person_hand"])
+            if action.get("product"):
+                parts.append(action["product"])
+            if not parts and action.get("narrative_role"):
+                parts.append(action["narrative_role"])
+            action_description = "; ".join(parts) or "no description"
+            # 视觉锚点：product_specific_elements + scene_elements
+            anchors = []
+            for elem in (va_shot.get("product_specific_elements") or []):
+                if isinstance(elem, str):
+                    anchors.append(elem)
+            for elem in (va_shot.get("scene_elements") or []):
+                if isinstance(elem, str):
+                    anchors.append(elem)
+            visual_anchors = ", ".join(anchors[:5]) if anchors else ""
+
+        # 2. 从 rhythm_analysis 提取节奏信息
+        ra_shots = (self.rhythm_analysis or {}).get("shots") or []
+        pace = "medium"
+        original_duration = target_duration  # 兜底
+        if shot_number - 1 < len(ra_shots):
+            ra_shot = ra_shots[shot_number - 1] or {}
+            pace = ra_shot.get("pace", "medium")
+            original_duration = float(ra_shot.get("duration_sec") or target_duration)
+
+        # 3. 调用 Gemini 语义选段
+        result = await self.gemini.semantic_clip_pick(
+            video_bytes=clip_video_bytes,
+            shot_number=shot_number,
+            source_duration=source_duration,
+            target_duration=target_duration,
+            original_duration=original_duration,
+            action_description=action_description,
+            pace=pace,
+            visual_anchors=visual_anchors,
         )
-        return None
+
+        # 4. 校验结果
+        confidence = float(result.get("confidence", 0.0))
+        if confidence < 0.7:
+            logger.info(
+                f"[ClipEditorAgent] 镜头 {shot_number} 语义选段置信度不足 "
+                f"({confidence:.2f} < 0.7)，降级 trim_head"
+            )
+            return None
+
+        window = result.get("best_window") or {}
+        start_sec = float(window.get("start_sec", 0.0))
+        end_sec = float(window.get("end_sec", 0.0))
+        window_dur = end_sec - start_sec
+
+        # 窗口时长与目标时长差距校验
+        if abs(window_dur - target_duration) > 0.2:
+            logger.warning(
+                f"[ClipEditorAgent] 镜头 {shot_number} 窗口时长 {window_dur:.2f}s "
+                f"与目标 {target_duration:.2f}s 差距 > 0.2s，降级 trim_head"
+            )
+            return None
+
+        # 边界校验
+        if start_sec < 0:
+            start_sec = 0.0
+        if end_sec > source_duration:
+            end_sec = source_duration
+
+        # 5. 构造 EditPlan
+        keep_anchors = []
+        for anchor in (result.get("semantic_anchors") or []):
+            if isinstance(anchor, dict) and anchor.get("description"):
+                keep_anchors.append(anchor["description"])
+            elif isinstance(anchor, str):
+                keep_anchors.append(anchor)
+
+        return EditPlan(
+            shot_number=shot_number,
+            source_duration=source_duration,
+            target_duration=target_duration,
+            strategy=STRATEGY_TRIM_SEMANTIC,
+            trim=EditTrim(start_sec=start_sec, end_sec=end_sec),
+            speed=1.0,
+            keep_anchors=keep_anchors[:5],
+            confidence=confidence,
+            reasoning=result.get("reasoning", "Gemini 语义选段"),
+            fallback={
+                "strategy": STRATEGY_TRIM_HEAD,
+                "trim": {"start_sec": 0.0, "end_sec": min(target_duration, source_duration)},
+            },
+        )
 
     # ------------------------------------------------------------------
     # 预估输出时长（用于 Response.expected_output_duration）
