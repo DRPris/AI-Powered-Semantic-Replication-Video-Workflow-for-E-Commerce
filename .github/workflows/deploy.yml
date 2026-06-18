@@ -1,9 +1,16 @@
 name: Deploy to Server
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  workflow_dispatch:  # 手动触发，本地调试稳定后再部署
+    inputs:
+      confirm:
+        description: '确认部署到生产环境？'
+        required: true
+        default: 'yes'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
 
 # 串行执行：同一时间只允许一个部署，避免并发冲突
 concurrency:
