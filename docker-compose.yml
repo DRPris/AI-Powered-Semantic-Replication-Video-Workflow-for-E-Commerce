@@ -1,0 +1,29 @@
+services:
+  video-replication:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: semantic-video-replication:latest
+    container_name: video-replication-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${SERVICE_PORT:-8000}:8000"
+    volumes:
+      # 持久化运行时产物（OST 中间帧、ffmpeg 临时文件）
+      - ./tmp:/app/tmp
+      - ./static:/app/static
+      - ./scripts/output:/app/scripts/output
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# 备注：
+# 1. 使用前先 `cp .env.example .env` 并填入真实密钥
+# 2. 启动：`docker compose up -d --build`
+# 3. 查看日志：`docker compose logs -f video-replication`
+# 4. 海外 API 走代理时，可在 .env 中配置 HTTP_PROXY / HTTPS_PROXY
