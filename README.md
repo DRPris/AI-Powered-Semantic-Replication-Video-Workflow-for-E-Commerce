@@ -59,6 +59,7 @@ cp .env.example .env
 | `SEEDANCE_API_KEY` | 主用图生视频平台 | https://console.volcengine.com/ark |
 | `KLING_ACCESS_KEY` / `KLING_SECRET_KEY` | 首尾双锚定视频平台（可选） | https://klingai.com/dev-center |
 | `DATABASE_URL` / `REDIS_URL` | 生产状态库与任务队列 | Docker Compose 默认提供 |
+| `API_KEYS` | API 访问密钥，保护高成本接口 | 自行生成强随机字符串 |
 | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_BUCKET_NAME` | 素材存储 | https://oss.console.aliyun.com |
 
 可选：`TAVILY_API_KEY`（商品品牌检索）、`ELEVENLABS_API_KEY`（环境音）、`SUNO_API_KEY`（BGM）、`WAN_API_KEY`（兜底）。
@@ -79,6 +80,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/start-workflow \
+  -H "X-API-Key: your_internal_api_key_here" \
   -H "Content-Type: application/json" \
   -d '{
     "project_id": "demo_001",
@@ -127,6 +129,27 @@ Airtable 已降级为 legacy adapter；只有显式设置 `DATA_BACKEND=airtable
 ```bash
 pip install -r requirements-airtable.txt
 ```
+
+## API 鉴权
+
+生产默认开启 API 鉴权：
+
+- `API_AUTH_ENABLED=true`
+- `API_KEYS=key1,key2`
+
+请求任意 `/api/v1/*` 接口时，需要携带其中一种 header：
+
+```bash
+X-API-Key: key1
+```
+
+或：
+
+```bash
+Authorization: Bearer key1
+```
+
+`/health` 和 `/ready` 不需要鉴权，便于负载均衡和容器健康检查。开发环境如需临时关闭，可设置 `API_AUTH_ENABLED=false`；生产不建议关闭。
 
 ---
 

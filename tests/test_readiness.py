@@ -26,6 +26,8 @@ def _settings(**overrides):
         "SUNO_API_KEY": "",
         "ENABLE_BGM": False,
         "JOB_BACKEND": "memory",
+        "API_AUTH_ENABLED": True,
+        "API_KEYS": "configured",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -55,6 +57,14 @@ def test_postgres_backend_does_not_require_airtable_config(tmp_path: Path):
 
     assert "AIRTABLE_API_KEY" not in report.checks["core_configuration"]["missing"]
     assert "AIRTABLE_BASE_ID" not in report.checks["core_configuration"]["missing"]
+
+
+def test_ready_requires_api_keys_when_auth_enabled(tmp_path: Path):
+    report = build_readiness_report(_settings(API_KEYS=""), tmp_path)
+
+    assert report.ready is False
+    assert "API_KEYS" in report.checks["core_configuration"]["missing"]
+    assert report.checks["api_auth"]["passed"] is False
 
 
 def test_keyframe_provider_is_required_when_stage_enabled(tmp_path: Path):

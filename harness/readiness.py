@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .auth import parse_api_keys
+
 
 @dataclass(frozen=True)
 class ReadinessReport:
@@ -50,10 +52,18 @@ def build_readiness_report(settings: Any, project_root: Path) -> ReadinessReport
                 "AIRTABLE_BASE_ID": settings.AIRTABLE_BASE_ID,
             }
         )
+    if bool(getattr(settings, "API_AUTH_ENABLED", True)):
+        required_values["API_KEYS"] = getattr(settings, "API_KEYS", "")
     missing = [name for name, value in required_values.items() if not _configured(value)]
     checks["core_configuration"] = {"passed": not missing, "missing": missing}
     if missing:
         blocking.append(f"缺少核心配置: {', '.join(missing)}")
+
+    checks["api_auth"] = {
+        "passed": not bool(getattr(settings, "API_AUTH_ENABLED", True))
+        or bool(parse_api_keys(getattr(settings, "API_KEYS", ""))),
+        "enabled": bool(getattr(settings, "API_AUTH_ENABLED", True)),
+    }
 
     video_provider_ready = any(
         (

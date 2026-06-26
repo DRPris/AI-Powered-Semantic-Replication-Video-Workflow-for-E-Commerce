@@ -59,6 +59,17 @@ curl http://localhost:8000/ready
 
 When `JOB_BACKEND=durable`, `/ready` checks PostgreSQL and Redis in addition to core runtime config.
 
+## API access control
+
+Production defaults to API-key authentication:
+
+- `API_AUTH_ENABLED=true`
+- `API_KEYS=<comma-separated internal keys>`
+
+Every route except `/health` and `/ready` requires either `X-API-Key` or
+`Authorization: Bearer`. This protects endpoints that can trigger model spend or
+expose project assets/status.
+
 ## Migration
 
 ```bash

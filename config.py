@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # postgres = production default, airtable = legacy prototype adapter
     DATA_BACKEND: str = "postgres"
 
+    # API access control
+    API_AUTH_ENABLED: bool = True
+    API_KEYS: str = ""  # comma-separated keys accepted via X-API-Key or Bearer token
+
     # Airtable legacy adapter (only required when DATA_BACKEND=airtable)
     AIRTABLE_API_KEY: str = ""
     AIRTABLE_BASE_ID: str = ""

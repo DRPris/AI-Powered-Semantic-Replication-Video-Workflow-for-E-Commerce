@@ -6,7 +6,6 @@ Video Replication Service - FastAPI 入口
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Optional
 import httpx
@@ -16,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from pydantic import BaseModel, Field, model_validator
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -37,7 +36,6 @@ from models.schemas import (
     ClipEditorResponse,
 )
 from workflows import (
-    run_stage1,
     run_stage2,
     run_stage3,
     run_stage3_5,
@@ -52,6 +50,7 @@ from services.oss_service import OSSService
 from services.token_tracker import token_tracker
 from harness import (
     InputValidationError,
+    authorize_api_request,
     build_readiness_report,
     check_durable_infrastructure,
     validate_public_http_url,
@@ -117,6 +116,21 @@ app = FastAPI(
     description="语义复刻视频工作流服务 - 将成功视频创意复刻到新商品",
     version="1.0.0",
 )
+
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    """Protect routes that can expose project data or trigger model spend."""
+    if request.url.path in {"/health", "/ready"}:
+        return await call_next(request)
+
+    decision = authorize_api_request(settings, request.headers)
+    if not decision.allowed:
+        return JSONResponse(
+            status_code=decision.status_code,
+            content={"detail": decision.message},
+        )
+    return await call_next(request)
 
 # 挂载静态文件目录（用于帧图片访问）
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

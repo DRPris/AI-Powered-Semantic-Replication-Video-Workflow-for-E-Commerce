@@ -4,6 +4,64 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260626-009] ruff_main_import_order_existing_debt
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+Adding `main.py` to the ad hoc Ruff scope exposed existing `E402` import-order debt caused by calling `load_dotenv()` before application imports.
+
+### Error
+```
+E402 Module level import not at top of file
+F401 unused imports in main.py
+```
+
+### Context
+- Command: `.venv/bin/ruff check ... main.py`
+- Safe cleanup removed unused imports.
+- Import-order cleanup was deferred because it affects environment-loading semantics and should be handled deliberately.
+
+### Suggested Fix
+Refactor startup configuration so `.env` loading happens inside config initialization or an explicit bootstrap module, then add `main.py` to the normal CI Ruff scope.
+
+### Metadata
+- Reproducible: yes
+- Related Files: main.py, config.py, .github/workflows/ci.yml
+
+---
+
+## [ERR-20260626-008] apply_patch_context_mismatch
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Initial API auth patch failed because `harness/__init__.py` had additional exports compared with the expected context.
+
+### Error
+```
+apply_patch verification failed: Failed to find expected lines in harness/__init__.py
+```
+
+### Context
+- Attempted to add API auth exports based on stale file context.
+- Resolution: inspect the actual file and apply a smaller patch against current content.
+
+### Suggested Fix
+Read small target files immediately before broad multi-file patches when prior turns may have changed exports.
+
+### Metadata
+- Reproducible: no
+- Related Files: harness/__init__.py
+
+---
+
 ## [ERR-20260626-007] pytest_readiness_mock_missing_data_backend
 
 **Logged**: 2026-06-26T00:00:00+08:00
