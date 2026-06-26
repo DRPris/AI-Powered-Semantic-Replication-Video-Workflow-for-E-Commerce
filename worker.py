@@ -17,7 +17,10 @@ from config import settings
 from persistence.database import close_database, get_session_factory
 from persistence.job_repository import DurableJobStatus, JobRepository
 from services.durable_queue import DurableJobQueue
+from workflows.stage4_generation import run_stage4
+from workflows.stage5_composition import run_stage5
 from workflows.full_workflow import run_full_workflow
+from workflows.full_workflow import run_post_generation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,14 +56,6 @@ class WorkflowWorker:
         )
         if job is None:
             return
-        if job.job_type != "full_workflow":
-            await self.repository.fail(
-                job.id,
-                error_code="UNSUPPORTED_JOB_TYPE",
-                error_message=f"Unsupported job type: {job.job_type}",
-                retryable=False,
-            )
-            return
 
         payload = job.payload
         failure_handled = False
@@ -92,15 +87,72 @@ class WorkflowWorker:
 
         heartbeat = asyncio.create_task(self._heartbeat(job.id))
         try:
-            await run_full_workflow(
-                project_id=payload["project_id"],
-                video_url=payload["video_url"],
-                product_image_url=payload["product_image_url"],
-                mode=payload["mode"],
-                product_listing_url=payload.get("product_listing_url"),
-                replicate_hook=payload.get("replicate_hook"),
-                update_job=update_job,
-            )
+            if job.job_type == "full_workflow":
+                await run_full_workflow(
+                    project_id=payload["project_id"],
+                    video_url=payload["video_url"],
+                    product_image_url=payload["product_image_url"],
+                    mode=payload["mode"],
+                    product_listing_url=payload.get("product_listing_url"),
+                    replicate_hook=payload.get("replicate_hook"),
+                    update_job=update_job,
+                )
+            elif job.job_type == "stage4_to_final":
+                await update_job(
+                    status=DurableJobStatus.PROCESSING.value,
+                    progress=0.1,
+                    result={"message": "Starting video generation"},
+                )
+                await run_stage4(
+                    project_id=payload["project_id"],
+                    platform=payload.get("platform", "seedance"),
+                )
+                await update_job(
+                    status=DurableJobStatus.PROCESSING.value,
+                    progress=0.6,
+                    result={
+                        "message": (
+                            "Video generation done, starting AI clip editing "
+                            "and composition"
+                        )
+                    },
+                )
+                stage5_result = await run_post_generation(
+                    payload["project_id"],
+                    update_job,
+                )
+                await update_job(
+                    status=DurableJobStatus.COMPLETED.value,
+                    progress=1.0,
+                    result={
+                        "project_id": payload["project_id"],
+                        "message": "视频生成 + AI 剪辑 + 合成全部完成",
+                        "final_video_url": stage5_result.get("final_video_url"),
+                        "duration": stage5_result.get("duration"),
+                    },
+                )
+            elif job.job_type == "stage5_composition":
+                await update_job(
+                    status=DurableJobStatus.PROCESSING.value,
+                    progress=0.1,
+                    result={"message": "Starting video composition"},
+                )
+                result = await run_stage5(
+                    project_id=payload["project_id"],
+                    skip_clip_editing=payload.get("skip_clip_editing", False),
+                )
+                await update_job(
+                    status=DurableJobStatus.COMPLETED.value,
+                    progress=1.0,
+                    result=result,
+                )
+            else:
+                await self.repository.fail(
+                    job.id,
+                    error_code="UNSUPPORTED_JOB_TYPE",
+                    error_message=f"Unsupported job type: {job.job_type}",
+                    retryable=False,
+                )
         except Exception as exc:
             if not failure_handled:
                 failed_job = await self.repository.fail(

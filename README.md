@@ -209,6 +209,8 @@ graph TB
 | 查项目人审状态 | `GET /api/v1/project/{project_id}/review-status` | 任意时刻 |
 | 健康检查 | `GET /health` | 启动后烟测 |
 
+当 `JOB_BACKEND=durable` 时，`/start-workflow`、`/generate-shots`、`/approve-keyframes` 和 `/compose-video` 都会创建 PostgreSQL job 并交给 worker 执行；内存任务状态只作为本地开发 fallback。
+
 完整接口与参数见 http://localhost:8000/docs（Swagger UI）。
 
 ---

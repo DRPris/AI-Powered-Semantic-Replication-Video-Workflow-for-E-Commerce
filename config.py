@@ -169,7 +169,8 @@ class Settings(BaseSettings):
     AMBIENT_MAX_DURATION_SEC: float = 22.0  # ElevenLabs sound-generation 单次最长 22s
 
     # 复刻剪辑 Agent (Stage 4.5)
-    CLIP_EDITOR_SEMANTIC_PICK: bool = False  # 是否启用 Phase 2 AI 语义选段（需 Gemini 视频理解）
+    CLIP_EDITOR_SEMANTIC_PICK: bool = True  # Phase 2 AI 语义选段（通过 Gemini 视频理解挑选最佳片段窗口）
+    CLIP_EDITOR_SPEED_ADJUST: bool = True  # Phase 3 变速策略（允许 1.0x~1.5x 加速代替裁剪，保留更多画面）
 
     # Service Configuration
     SERVICE_HOST: str = "0.0.0.0"

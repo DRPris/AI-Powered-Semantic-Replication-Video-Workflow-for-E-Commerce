@@ -4,6 +4,35 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260626-010] pytest_imported_config_from_lightweight_tests
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+A lightweight repository test imported `DurableJobService`, which imported `config` and failed in the local minimal test environment without `pydantic_settings`.
+
+### Error
+```
+ModuleNotFoundError: No module named 'pydantic_settings'
+```
+
+### Context
+- Command: `.venv/bin/pytest -q`
+- Trigger: adding a unit test for `DurableJobService.create_project_job`.
+- The repository tests had intentionally stayed independent of full app config.
+
+### Suggested Fix
+Keep low-level persistence tests focused on repository behavior. Cover service wiring through compile checks or higher-level integration tests where full app dependencies are installed.
+
+### Metadata
+- Reproducible: yes
+- Related Files: tests/test_job_repository.py, services/durable_job_service.py
+
+---
+
 ## [ERR-20260626-009] ruff_main_import_order_existing_debt
 
 **Logged**: 2026-06-26T00:00:00+08:00

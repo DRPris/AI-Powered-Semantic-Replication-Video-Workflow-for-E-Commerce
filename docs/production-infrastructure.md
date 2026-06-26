@@ -27,6 +27,16 @@ GET /api/v1/jobs/{job_id}
 
 Redis is not the source of truth. If Redis loses a notification, the job row still exists. If a worker dies, its lease expires and another worker can requeue the job.
 
+The same durable infrastructure is also used for manual continuation jobs when
+`JOB_BACKEND=durable`:
+
+- `POST /api/v1/generate-shots` creates a `stage4_to_final` job.
+- `POST /api/v1/projects/{project_id}/approve-keyframes` creates a `stage4_to_final` job after validation.
+- `POST /api/v1/compose-video` creates a `stage5_composition` job.
+
+Local memory-backed task dictionaries remain only as a development fallback when
+`JOB_BACKEND=memory`.
+
 ## Core tables
 
 - `projects`: stable project records and workflow state.

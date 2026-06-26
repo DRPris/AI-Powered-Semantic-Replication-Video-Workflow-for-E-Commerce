@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -556,16 +555,20 @@ class FFmpegService:
             cmd += ["-to", f"{float(end_sec):.3f}"]
         cmd += ["-i", input_path]
 
-        # 变速：video 用 setpts，audio 用 atempo
-        if abs(speed - 1.0) > 1e-3:
-            # atempo 单次范围 [0.5, 2.0]，此处 speed 上限 2.0 已满足
-            video_pts = 1.0 / speed  # setpts 与实际倍速成反比
-            cmd += [
-                "-filter_complex",
-                f"[0:v]setpts={video_pts:.4f}*PTS[v];[0:a]atempo={speed:.4f}[a]",
-                "-map", "[v]",
-                "-map", "[a]",
-            ]
+        # 变速：video 用 setpts，audio 用 atempo（需检测音轨避免报错）
+        needs_speed = abs(speed - 1.0) > 1e-3
+        has_audio = await self._has_audio_track(input_path) if needs_speed else False
+        if needs_speed:
+            video_pts = 1.0 / speed
+            if has_audio:
+                cmd += [
+                    "-filter_complex",
+                    f"[0:v]setpts={video_pts:.4f}*PTS[v];[0:a]atempo={speed:.4f}[a]",
+                    "-map", "[v]",
+                    "-map", "[a]",
+                ]
+            else:
+                cmd += ["-vf", f"setpts={video_pts:.4f}*PTS", "-an"]
 
         cmd += [
             "-c:v", "libx264",

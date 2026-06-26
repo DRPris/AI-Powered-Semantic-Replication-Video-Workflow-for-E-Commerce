@@ -18,9 +18,8 @@ ClipEditorAgent: 复刻剪辑 Agent 主类
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from models.schemas import EditPlan, EditTrim, ClipEditorResponse
 
@@ -259,14 +258,23 @@ class ClipEditorAgent:
         target_duration: float,
         clip_video_bytes: Optional[bytes] = None,
     ) -> EditPlan:
-        """为单个镜头决定剪辑策略。"""
+        """为单个镜头决定剪辑策略。
+
+        决策优先级:
+        1. no_op     — 时长差极小，不做处理
+        2. no_op     — 源比目标短（暂不拉伸）
+        3. speed_up  — Phase 3: 纯变速即可满足(<=1.5x)，保留完整内容
+        4. semantic  — Phase 2: LLM 语义选段
+        5. trim_and_speed — Phase 3: 先裁剪再微调变速
+        6. trim_head — Phase 1: 从头裁剪（最终兜底）
+        """
         delta = source_duration - target_duration
 
         # Case 1: 时长差 <= 阈值，no_op
         if abs(delta) <= NO_OP_DURATION_DELTA:
             return self._no_op_plan(shot_number, source_duration, target_duration)
 
-        # Case 2: source < target，生成 clip 反而比目标还短 —— Phase 1 保持原样，后续可考虑 pad
+        # Case 2: source < target，生成 clip 反而比目标还短
         if delta < 0:
             return EditPlan(
                 shot_number=shot_number,
@@ -279,8 +287,20 @@ class ClipEditorAgent:
                 reasoning=f"源时长 {source_duration:.2f}s 短于目标 {target_duration:.2f}s，暂不拉伸",
             )
 
-        # Case 3: source > target —— 需要裁剪
-        # Phase 2: 若启用语义选段，优先调用 LLM
+        # Case 3: source > target —— 需要缩短
+
+        # Phase 3 优先判断：纯变速即可解决 —— 保留全部视频内容
+        if self.enable_speed_adjust:
+            speed_needed = source_duration / target_duration
+            if speed_needed <= MAX_SPEED_MULTIPLIER:
+                return self._speed_up_plan(
+                    shot_number=shot_number,
+                    source_duration=source_duration,
+                    target_duration=target_duration,
+                    speed=speed_needed,
+                )
+
+        # Phase 2: 若启用语义选段，调用 LLM
         if self.enable_llm_semantic_pick and self.gemini and clip_video_bytes:
             try:
                 semantic_plan = await self._semantic_pick_via_llm(
@@ -293,10 +313,20 @@ class ClipEditorAgent:
                     return semantic_plan
             except Exception as e:
                 logger.warning(
-                    f"[ClipEditorAgent] 镜头 {shot_number} 语义选段失败，降级 trim_head: {e}"
+                    f"[ClipEditorAgent] 镜头 {shot_number} 语义选段失败，降级: {e}"
                 )
 
-        # 默认：trim_head（Phase 1 主策略）
+        # Phase 3 trim_and_speed：裁剪后再微调变速使时长精确匹配
+        if self.enable_speed_adjust and delta > NO_OP_DURATION_DELTA:
+            plan = self._trim_and_speed_plan(
+                shot_number=shot_number,
+                source_duration=source_duration,
+                target_duration=target_duration,
+            )
+            if plan:
+                return plan
+
+        # Phase 1 兜底：trim_head
         return self._trim_head_plan(
             shot_number=shot_number,
             source_duration=source_duration,
@@ -343,6 +373,78 @@ class ClipEditorAgent:
             fallback={
                 "strategy": STRATEGY_TRIM_HEAD,
                 "trim": {"start_sec": 0.0, "end_sec": end_sec},
+            },
+        )
+
+    @staticmethod
+    def _speed_up_plan(
+        shot_number: int,
+        source_duration: float,
+        target_duration: float,
+        speed: float,
+    ) -> EditPlan:
+        """Phase 3: 纯变速 —— 加速播放使 source 刚好压缩到 target。
+
+        适用于 source 略长于 target（所需倍率 <= MAX_SPEED_MULTIPLIER）的场景，
+        比裁剪更优因为保留了视频的全部画面内容。
+        """
+        speed = round(speed, 4)
+        return EditPlan(
+            shot_number=shot_number,
+            source_duration=source_duration,
+            target_duration=target_duration,
+            strategy=STRATEGY_SPEED_UP,
+            trim=None,
+            speed=speed,
+            confidence=0.8,
+            reasoning=(
+                f"Phase 3 变速：{speed:.2f}x 加速 "
+                f"({source_duration:.2f}s -> {target_duration:.2f}s)，保留完整内容"
+            ),
+            fallback={
+                "strategy": STRATEGY_TRIM_HEAD,
+                "trim": {"start_sec": 0.0, "end_sec": min(target_duration, source_duration)},
+            },
+        )
+
+    @staticmethod
+    def _trim_and_speed_plan(
+        shot_number: int,
+        source_duration: float,
+        target_duration: float,
+    ) -> Optional[EditPlan]:
+        """Phase 3: 先裁剪再微调变速 —— 先 trim 掉大块多余，再小幅变速精修。
+
+        策略：先从头裁剪到 target_duration * MAX_SPEED_MULTIPLIER（留出变速裕量），
+        然后用变速微调到精确目标时长。若最终所需变速 > MAX_SPEED_MULTIPLIER 则放弃。
+        """
+        # 裁剪后保留的时长上限：让变速后刚好等于 target
+        # speed = trim_duration / target_duration，限制 speed <= MAX_SPEED_MULTIPLIER
+        # => trim_duration <= target_duration * MAX_SPEED_MULTIPLIER
+        max_keep = target_duration * MAX_SPEED_MULTIPLIER
+        # 实际保留的时长不超过源时长
+        trim_end = min(max_keep, source_duration)
+        speed = trim_end / target_duration
+
+        if speed > MAX_SPEED_MULTIPLIER or speed < 1.0:
+            return None
+
+        speed = round(speed, 4)
+        return EditPlan(
+            shot_number=shot_number,
+            source_duration=source_duration,
+            target_duration=target_duration,
+            strategy=STRATEGY_TRIM_AND_SPEED,
+            trim=EditTrim(start_sec=0.0, end_sec=round(trim_end, 3)),
+            speed=speed,
+            confidence=0.7,
+            reasoning=(
+                f"Phase 3 裁剪+变速：先取前 {trim_end:.2f}s，"
+                f"再 {speed:.2f}x 加速 -> {target_duration:.2f}s"
+            ),
+            fallback={
+                "strategy": STRATEGY_TRIM_HEAD,
+                "trim": {"start_sec": 0.0, "end_sec": min(target_duration, source_duration)},
             },
         )
 

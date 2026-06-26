@@ -128,3 +128,35 @@ def test_retryable_failure_requeues_until_attempt_limit():
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_repository_creates_project_scoped_stage_job():
+    async def scenario():
+        engine, repository = await _repository()
+        try:
+            project = await repository.create_project(
+                external_id="portfolio-002",
+                airtable_record_id="rec002",
+                name="stage job",
+                mode="full",
+                original_video_url="https://cdn.example.com/original.mp4",
+                product_image_url="https://cdn.example.com/product.png",
+                product_listing_url=None,
+            )
+
+            job = await repository.create_job(
+                project_id=project.id,
+                job_type="stage4_to_final",
+                queue_name="test-jobs",
+                payload={"project_id": str(project.id), "platform": "seedance"},
+                max_attempts=3,
+            )
+            queued = await repository.mark_queued(job.id)
+
+            assert queued.project_id == project.id
+            assert queued.job_type == "stage4_to_final"
+            assert queued.status == DurableJobStatus.QUEUED.value
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

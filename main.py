@@ -44,6 +44,7 @@ from workflows import (
     run_stage5,
     run_full_workflow,
 )
+from workflows.full_workflow import run_post_generation
 from services.airtable_service import AirtableService
 from services.ffmpeg_service import FFmpegService
 from services.oss_service import OSSService
@@ -718,6 +719,30 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
 
     基于提示词批量生成所有分镜的视频片段
     """
+    if settings.JOB_BACKEND == "durable":
+        from services.durable_job_service import DurableJobService
+
+        durable_jobs = DurableJobService()
+        try:
+            durable_job = await durable_jobs.create_project_job(
+                project_id=request.project_id,
+                job_type="stage4_to_final",
+                payload={
+                    "project_id": request.project_id,
+                    "platform": request.platform,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        finally:
+            await durable_jobs.close()
+        return {
+            "job_id": str(durable_job.id),
+            "status": durable_job.status,
+            "message": "视频生成 + AI 剪辑 + 合成任务已进入持久化队列",
+            "project_id": request.project_id,
+        }
+
     import uuid
     job_id = str(uuid.uuid4())
 
@@ -742,11 +767,19 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
                 project_id=request.project_id,
                 platform=request.platform if hasattr(request, 'platform') else "seedance",
             )
+            _generation_jobs[job_id]["progress"] = 0.6
+            _generation_jobs[job_id]["message"] = "Video generation done, starting AI clip editing + composition..."
+
+            stage5_result = await run_post_generation(request.project_id)
 
             _generation_jobs[job_id].update({
                 "status": JobStatus.COMPLETED,
                 "progress": 1.0,
-                "message": "Video generation completed successfully",
+                "result": {
+                    "final_video_url": stage5_result.get("final_video_url"),
+                    "duration": stage5_result.get("duration"),
+                },
+                "message": "视频生成 + AI 剪辑 + 合成全部完成",
             })
         except Exception as e:
             logger.error(f"Generation job {job_id} failed: {str(e)}")
@@ -760,7 +793,7 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
     return {
         "job_id": job_id,
         "status": JobStatus.PROCESSING,
-        "message": "Shot generation job started",
+        "message": "视频生成 + AI 剪辑 + 合成任务已启动",
         "project_id": request.project_id,
     }
 
@@ -772,6 +805,28 @@ async def get_generation_status(job_id: str) -> JobStatusResponse:
 
     获取指定任务 ID 的生成进度和状态
     """
+    if settings.JOB_BACKEND == "durable":
+        from services.durable_job_service import DurableJobService
+
+        durable_jobs = DurableJobService()
+        try:
+            job = await durable_jobs.get(job_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        finally:
+            await durable_jobs.close()
+        if job is not None:
+            return JobStatusResponse(
+                job_id=str(job.id),
+                status=job.status,
+                progress=job.progress,
+                result=job.result,
+                message=job.error_message
+                or ((job.result or {}).get("message") if job.result else None),
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            )
+
     if job_id not in _generation_jobs:
         from services.job_manager import job_manager
 
@@ -851,6 +906,31 @@ async def compose_video(
 
     将所有审核通过的分镜视频片段合成为完整的最终视频
     """
+    if settings.JOB_BACKEND == "durable":
+        from services.durable_job_service import DurableJobService
+
+        durable_jobs = DurableJobService()
+        try:
+            durable_job = await durable_jobs.create_project_job(
+                project_id=request.project_id,
+                job_type="stage5_composition",
+                payload={
+                    "project_id": request.project_id,
+                    "skip_clip_editing": request.skip_clip_editing,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        finally:
+            await durable_jobs.close()
+        return {
+            "job_id": str(durable_job.id),
+            "status": durable_job.status,
+            "message": "Video composition job queued",
+            "project_id": request.project_id,
+            "skip_clip_editing": request.skip_clip_editing,
+        }
+
     import uuid
     job_id = str(uuid.uuid4())
 
@@ -926,6 +1006,28 @@ async def get_compose_status(job_id: str) -> JobStatusResponse:
 
     获取指定任务 ID 的合成进度和状态
     """
+    if settings.JOB_BACKEND == "durable":
+        from services.durable_job_service import DurableJobService
+
+        durable_jobs = DurableJobService()
+        try:
+            job = await durable_jobs.get(job_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        finally:
+            await durable_jobs.close()
+        if job is not None:
+            return JobStatusResponse(
+                job_id=str(job.id),
+                status=job.status,
+                progress=job.progress,
+                result=job.result,
+                message=job.error_message
+                or ((job.result or {}).get("message") if job.result else None),
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            )
+
     if job_id not in _composition_jobs:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -1186,6 +1288,28 @@ async def approve_keyframes(
         )
         logger.info(f"[{project_id}] 项目状态 → GENERATING")
 
+        if settings.JOB_BACKEND == "durable":
+            from services.durable_job_service import DurableJobService
+
+            durable_jobs = DurableJobService()
+            try:
+                durable_job = await durable_jobs.create_project_job(
+                    project_id=project_id,
+                    job_type="stage4_to_final",
+                    payload={
+                        "project_id": project_id,
+                        "platform": "seedance",
+                    },
+                )
+            finally:
+                await durable_jobs.close()
+            return {
+                "job_id": str(durable_job.id),
+                "status": durable_job.status,
+                "message": "关键帧审核通过，视频生成 + AI 剪辑 + 合成任务已进入持久化队列",
+                "project_id": project_id,
+            }
+
         # 创建后台任务触发 Stage 4
         job_id = str(uuid.uuid4())
 
@@ -1207,11 +1331,19 @@ async def approve_keyframes(
                     project_id=project_id,
                     platform="seedance",
                 )
+                _generation_jobs[job_id]["progress"] = 0.6
+                _generation_jobs[job_id]["message"] = "Video generation done, starting AI clip editing + composition..."
+
+                stage5_result = await run_post_generation(project_id)
 
                 _generation_jobs[job_id].update({
                     "status": JobStatus.COMPLETED,
                     "progress": 1.0,
-                    "message": "Video generation completed successfully",
+                    "result": {
+                        "final_video_url": stage5_result.get("final_video_url"),
+                        "duration": stage5_result.get("duration"),
+                    },
+                    "message": "视频生成 + AI 剪辑 + 合成全部完成",
                 })
             except Exception as e:
                 logger.error(f"Generation job {job_id} failed: {str(e)}", exc_info=True)
@@ -1225,7 +1357,7 @@ async def approve_keyframes(
         return {
             "job_id": job_id,
             "status": JobStatus.PROCESSING,
-            "message": "关键帧审核通过，视频生成已启动",
+            "message": "关键帧审核通过，视频生成 + AI 剪辑 + 合成任务已启动",
             "project_id": project_id,
         }
 
