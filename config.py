@@ -71,7 +71,11 @@ class Settings(BaseSettings):
     WAN_RESOLUTION: str = "720P"  # 480P / 720P / 1080P
     ENABLE_WAN_FALLBACK: bool = True  # Kling 单镜头失败时是否自动切 wan 兜底
 
-    # Airtable
+    # State storage backend
+    # postgres = production default, airtable = legacy prototype adapter
+    DATA_BACKEND: str = "postgres"
+
+    # Airtable legacy adapter (only required when DATA_BACKEND=airtable)
     AIRTABLE_API_KEY: str = ""
     AIRTABLE_BASE_ID: str = ""
 

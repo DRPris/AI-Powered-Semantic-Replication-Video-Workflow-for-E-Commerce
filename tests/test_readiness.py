@@ -47,6 +47,16 @@ def test_not_ready_when_core_configuration_is_missing(tmp_path: Path):
     assert "GEMINI_API_KEY" in report.checks["core_configuration"]["missing"]
 
 
+def test_postgres_backend_does_not_require_airtable_config(tmp_path: Path):
+    report = build_readiness_report(
+        _settings(AIRTABLE_API_KEY="", AIRTABLE_BASE_ID="", DATA_BACKEND="postgres"),
+        tmp_path,
+    )
+
+    assert "AIRTABLE_API_KEY" not in report.checks["core_configuration"]["missing"]
+    assert "AIRTABLE_BASE_ID" not in report.checks["core_configuration"]["missing"]
+
+
 def test_keyframe_provider_is_required_when_stage_enabled(tmp_path: Path):
     report = build_readiness_report(_settings(KIE_API_KEY=""), tmp_path)
     assert report.ready is False

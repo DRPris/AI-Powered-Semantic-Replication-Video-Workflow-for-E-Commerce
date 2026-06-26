@@ -56,6 +56,31 @@ class DurableJobService:
         await self.queue.enqueue(job.id)
         return project, job
 
+    async def create_workflow_job_for_existing_project(
+        self,
+        *,
+        project_id: str | uuid.UUID,
+        external_project_id: str,
+        product_listing_url: str | None,
+        payload: dict[str, Any],
+    ) -> tuple[ProjectRecord, JobRecord]:
+        project_uuid = uuid.UUID(str(project_id))
+        project = await self.repository.attach_external_id(
+            project_uuid,
+            external_id=external_project_id,
+            product_listing_url=product_listing_url,
+        )
+        job = await self.repository.create_job(
+            project_id=project.id,
+            job_type="full_workflow",
+            queue_name=settings.JOB_QUEUE_NAME,
+            payload=payload,
+            max_attempts=settings.JOB_MAX_ATTEMPTS,
+        )
+        await self.repository.mark_queued(job.id)
+        await self.queue.enqueue(job.id)
+        return project, job
+
     async def find_existing_workflow(
         self, external_project_id: str
     ) -> tuple[ProjectRecord, JobRecord] | None:

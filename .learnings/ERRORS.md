@@ -4,6 +4,34 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260626-007] pytest_readiness_mock_missing_data_backend
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Readiness tests failed after adding `DATA_BACKEND` because test settings used `SimpleNamespace` without the new attribute.
+
+### Error
+```
+AttributeError: 'types.SimpleNamespace' object has no attribute 'DATA_BACKEND'
+```
+
+### Context
+- Command: `.venv/bin/pytest -q`
+- Trigger: migration from Airtable-required readiness to backend-selectable readiness.
+
+### Suggested Fix
+Use `getattr(settings, "DATA_BACKEND", "postgres")` in readiness checks or update all test settings fixtures when adding required config attributes.
+
+### Metadata
+- Reproducible: yes
+- Related Files: harness/readiness.py, tests/test_readiness.py
+
+---
+
 ## [ERR-20260626-008] python310_datetime_compat
 
 **Logged**: 2026-06-26T00:00:00+08:00

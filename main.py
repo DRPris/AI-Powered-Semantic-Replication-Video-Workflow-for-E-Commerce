@@ -271,7 +271,7 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                 existing_project, existing_job = existing
                 await durable_jobs.close()
                 return {
-                    "project_id": existing_project.airtable_record_id,
+                    "project_id": str(existing_project.id),
                     "job_id": str(existing_job.id),
                     "status": existing_job.status,
                     "message": "相同 project_id 的任务已存在，返回原任务",
@@ -327,23 +327,38 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                 # 不阻塞工作流，继续执行
 
         if settings.JOB_BACKEND == "durable":
-            _, durable_job = await durable_jobs.create_workflow_job(
-                external_project_id=request.project_id,
-                airtable_record_id=project_id,
-                name=request.project_name or f"project_{request.project_id}",
-                mode=request.mode.value,
-                video_url=request.video_url,
-                product_image_url=request.product_image_url,
-                product_listing_url=request.product_listing_url,
-                payload={
-                    "project_id": project_id,
-                    "video_url": request.video_url,
-                    "product_image_url": request.product_image_url,
-                    "mode": request.mode.value,
-                    "product_listing_url": request.product_listing_url,
-                    "replicate_hook": request.replicate_hook,
-                },
-            )
+            if settings.DATA_BACKEND == "postgres":
+                _, durable_job = await durable_jobs.create_workflow_job_for_existing_project(
+                    project_id=project_id,
+                    external_project_id=request.project_id,
+                    product_listing_url=request.product_listing_url,
+                    payload={
+                        "project_id": project_id,
+                        "video_url": request.video_url,
+                        "product_image_url": request.product_image_url,
+                        "mode": request.mode.value,
+                        "product_listing_url": request.product_listing_url,
+                        "replicate_hook": request.replicate_hook,
+                    },
+                )
+            else:
+                _, durable_job = await durable_jobs.create_workflow_job(
+                    external_project_id=request.project_id,
+                    airtable_record_id=project_id,
+                    name=request.project_name or f"project_{request.project_id}",
+                    mode=request.mode.value,
+                    video_url=request.video_url,
+                    product_image_url=request.product_image_url,
+                    product_listing_url=request.product_listing_url,
+                    payload={
+                        "project_id": project_id,
+                        "video_url": request.video_url,
+                        "product_image_url": request.product_image_url,
+                        "mode": request.mode.value,
+                        "product_listing_url": request.product_listing_url,
+                        "replicate_hook": request.replicate_hook,
+                    },
+                )
             job_id = str(durable_job.id)
             await durable_jobs.close()
             durable_jobs = None

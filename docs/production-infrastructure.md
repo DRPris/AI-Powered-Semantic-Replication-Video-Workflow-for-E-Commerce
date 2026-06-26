@@ -10,9 +10,9 @@ This project now supports two job backends:
 ```text
 POST /api/v1/start-workflow
 ↓
-Create Airtable project record
+Create Project row in PostgreSQL
 ↓
-Create Project + Job rows in PostgreSQL
+Attach durable Job row to the project
 ↓
 Push job_id to Redis queue
 ↓
@@ -29,7 +29,7 @@ Redis is not the source of truth. If Redis loses a notification, the job row sti
 
 ## Core tables
 
-- `projects`: stable project records, linked to Airtable during migration.
+- `projects`: stable project records and workflow state.
 - `jobs`: durable workflow jobs, status, payload, lease, attempts, result and errors.
 - `shots`: production shot-level state target.
 - `assets`: generated and uploaded media records.
@@ -72,6 +72,18 @@ mkdir -p tmp
 DATABASE_URL=sqlite+aiosqlite:///./tmp/alembic_check.sqlite alembic upgrade head
 ```
 
-## Current migration boundary
+## Data backend strategy
 
-Airtable remains the operational review interface. PostgreSQL now owns durable job state and contains the target production schema. Subsequent work should progressively move project, shot, asset, review and failure writes from Airtable-only into PostgreSQL-first with optional Airtable sync.
+PostgreSQL is the production default (`DATA_BACKEND=postgres`). Existing workflow
+stages still import `AirtableService` for compatibility, but that name now resolves
+to a PostgreSQL-backed implementation unless `DATA_BACKEND=airtable` is explicitly
+set.
+
+Airtable is retained only as a legacy adapter for older demos. The production
+direction is a low-cost stack:
+
+- PostgreSQL: projects, jobs, shots, assets, reviews, failures.
+- Redis: queue notification, not source of truth.
+- OSS/S3-compatible storage: large video/image assets.
+- A minimal internal review dashboard/API instead of Airtable as the human review
+  surface.

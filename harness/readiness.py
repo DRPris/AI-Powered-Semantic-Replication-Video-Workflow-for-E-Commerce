@@ -38,13 +38,18 @@ def build_readiness_report(settings: Any, project_root: Path) -> ReadinessReport
     required_values = {
         "GEMINI_API_KEY": settings.GEMINI_API_KEY,
         "QWEN_API_KEY": settings.QWEN_API_KEY,
-        "AIRTABLE_API_KEY": settings.AIRTABLE_API_KEY,
-        "AIRTABLE_BASE_ID": settings.AIRTABLE_BASE_ID,
         "OSS_ACCESS_KEY_ID": settings.OSS_ACCESS_KEY_ID,
         "OSS_ACCESS_KEY_SECRET": settings.OSS_ACCESS_KEY_SECRET,
         "OSS_BUCKET_NAME": settings.OSS_BUCKET_NAME,
         "OSS_ENDPOINT": settings.OSS_ENDPOINT,
     }
+    if getattr(settings, "DATA_BACKEND", "postgres") == "airtable":
+        required_values.update(
+            {
+                "AIRTABLE_API_KEY": settings.AIRTABLE_API_KEY,
+                "AIRTABLE_BASE_ID": settings.AIRTABLE_BASE_ID,
+            }
+        )
     missing = [name for name, value in required_values.items() if not _configured(value)]
     checks["core_configuration"] = {"passed": not missing, "missing": missing}
     if missing:

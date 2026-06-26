@@ -124,6 +124,28 @@ class JobRepository:
             )
             return await session.scalar(query)
 
+    async def get_project(self, project_id: uuid.UUID) -> ProjectRecord | None:
+        async with self._session_factory() as session:
+            return await session.get(ProjectRecord, project_id)
+
+    async def attach_external_id(
+        self,
+        project_id: uuid.UUID,
+        *,
+        external_id: str,
+        product_listing_url: str | None,
+    ) -> ProjectRecord:
+        async with self._session_factory() as session:
+            project = await session.get(ProjectRecord, project_id)
+            if project is None:
+                raise ValueError(f"Project not found: {project_id}")
+            project.external_id = external_id
+            project.product_listing_url = product_listing_url
+            project.updated_at = _utcnow()
+            await session.commit()
+            await session.refresh(project)
+            return project
+
     async def latest_job_for_project(
         self, project_id: uuid.UUID
     ) -> JobRecord | None:

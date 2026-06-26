@@ -58,7 +58,7 @@ cp .env.example .env
 | `QWEN_API_KEY` | 分镜提示词自审核 | https://bailian.console.aliyun.com/ |
 | `SEEDANCE_API_KEY` | 主用图生视频平台 | https://console.volcengine.com/ark |
 | `KLING_ACCESS_KEY` / `KLING_SECRET_KEY` | 首尾双锚定视频平台（可选） | https://klingai.com/dev-center |
-| `AIRTABLE_API_KEY` / `AIRTABLE_BASE_ID` | 工作流状态存储 | https://airtable.com/create/tokens |
+| `DATABASE_URL` / `REDIS_URL` | 生产状态库与任务队列 | Docker Compose 默认提供 |
 | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_BUCKET_NAME` | 素材存储 | https://oss.console.aliyun.com |
 
 可选：`TAVILY_API_KEY`（商品品牌检索）、`ELEVENLABS_API_KEY`（环境音）、`SUNO_API_KEY`（BGM）、`WAN_API_KEY`（兜底）。
@@ -92,34 +92,41 @@ curl -X POST http://localhost:8000/api/v1/start-workflow \
 
 返回示例：
 ```json
-{"project_id": "recXXXXXXXXXXXXXX", "status": "started", "job_id": "job_abc123"}
+{"project_id": "550e8400-e29b-41d4-a716-446655440000", "status": "started", "job_id": "job_abc123"}
 ```
 
 **预期产出节奏**（simple 模式，单镜头 5s × 5 个镜头为例）：
 
 | 阶段 | 耗时（约） | 看哪里 |
 |---|---|---|
-| Stage 1 视频/商品分析 | 1~3 分钟 | Airtable Project「Stage」=`ANALYZING` |
-| Stage 2 脚本生成 | 30 秒 | Airtable Shots 表「新镜头描述」字段 |
-| Stage 3 提示词 | 30 秒 | Shots「视频生成提示词」字段 |
-| Stage 3.5 关键帧 | 2~5 分钟 | Shots「关键帧」字段（图片 URL） |
-| **人审关键帧** | 取决于你 | Airtable 把「关键帧状态」改为「已通过」 |
-| Stage 4 视频生成 | 3~8 分钟 | Shots「生成视频」字段 |
-| Stage 5 合成 | 1~2 分钟 | Project「最终视频」字段（成片 URL）|
+| Stage 1 视频/商品分析 | 1~3 分钟 | PostgreSQL `projects/assets` 状态 |
+| Stage 2 脚本生成 | 30 秒 | PostgreSQL `shots` 分镜字段 |
+| Stage 3 提示词 | 30 秒 | PostgreSQL `shots` prompt 字段 |
+| Stage 3.5 关键帧 | 2~5 分钟 | PostgreSQL `shots` 关键帧 URL |
+| **人审关键帧** | 取决于你 | 通过 API / 后续管理后台更新审核状态 |
+| Stage 4 视频生成 | 3~8 分钟 | PostgreSQL `shots` 生成视频 URL |
+| Stage 5 合成 | 1~2 分钟 | PostgreSQL `projects` 最终视频字段 |
 
 > 💡 第一次跑建议用 `simple` 模式跳过部分审核以快速验证链路；正式交付切 `full`。
 
 ---
 
-## Airtable 配置
+## 数据库配置
 
-工作流以 Airtable 作为状态库与人审入口。需要在你的 Base 中创建以下表：
+生产默认使用 PostgreSQL 作为状态库，Redis 作为任务队列通知层：
 
-- **Projects**：项目主表（含原视频 URL、新商品资料、Stage 状态、模式开关等）
-- **Assets**：素材表（产品图、抠图、三视图、关键帧、分镜视频等）
-- **Shots**：分镜表（脚本、prompt、首尾帧引用、生成结果）
+- `DATA_BACKEND=postgres`
+- `JOB_BACKEND=durable`
+- `DATABASE_URL=postgresql+asyncpg://...`
+- `REDIS_URL=redis://...`
 
-> Schema 详见后续 `docs/airtable-schema.md`（待补）。
+Airtable 已降级为 legacy adapter；只有显式设置 `DATA_BACKEND=airtable` 时才需要 `AIRTABLE_API_KEY` / `AIRTABLE_BASE_ID`。生产上线不建议依赖 Airtable 作为核心数据库。
+
+如需运行旧 Airtable demo，再额外安装：
+
+```bash
+pip install -r requirements-airtable.txt
+```
 
 ---
 
@@ -129,7 +136,7 @@ curl -X POST http://localhost:8000/api/v1/start-workflow \
 .
 ├── agents/              # Product Brief Agent / Clip Editor Agent
 ├── workflows/           # 5 个 Stage 的编排逻辑
-├── services/            # 各 AI/云平台服务封装（gemini / kling / seedance / wan / oss / airtable / ffmpeg ...）
+├── services/            # 各 AI/云平台服务封装（gemini / kling / seedance / wan / oss / database / ffmpeg ...）
 ├── prompts/             # 所有 prompt 模板（按 stage / 任务分类）
 ├── models/              # Pydantic 数据模型
 ├── scripts/             # 通用运维工具（见 scripts/README.md）
@@ -149,20 +156,20 @@ curl -X POST http://localhost:8000/api/v1/start-workflow \
 graph TB
     A[POST /start-workflow] --> B[Stage 1 视频+商品分析]
     B --> C{Product Brief<br/>是否有待确认问题?}
-    C -->|有| D[人审: 在 Airtable<br/>填写「用户答复」]
+    C -->|有| D[人审: API/管理后台<br/>填写「用户答复」]
     D --> E[POST /confirm-brief]
     C -->|无| F[Stage 2 脚本生成]
     E --> F
     F --> G[Stage 3 提示词转换]
     G --> H[Stage 3.5 关键帧生成]
-    H --> I[人审: Airtable<br/>批准「关键帧状态」]
+    H --> I[人审: API/管理后台<br/>批准「关键帧状态」]
     I --> J[POST /generate-shots]
     J --> K[Stage 4 视频生成]
     K --> L[GET /generation-status/job_id<br/>轮询直到 done]
     L --> M[POST /compose-video]
     M --> N[Stage 5 拼接+OST+BGM+环境音]
     N --> O[GET /compose-status/job_id]
-    O --> P[Airtable 最终视频字段拿成片]
+    O --> P[数据库项目记录拿成片 URL]
 ```
 
 ### 接口清单
@@ -170,7 +177,7 @@ graph TB
 | 阶段 | 方法 + 路径 | 触发时机 |
 |---|---|---|
 | 启动 | `POST /api/v1/start-workflow` | 提交 video_url + product_image_url 启动 Stage 1 |
-| 确认 Brief | `POST /api/v1/projects/{project_id}/confirm-brief` | 看到 Airtable 有待确认问题时填答案后调用 |
+| 确认 Brief | `POST /api/v1/projects/{project_id}/confirm-brief` | 看到项目有待确认问题时填答案后调用 |
 | 触发视频生成 | `POST /api/v1/generate-shots` | 关键帧人审通过后调用 |
 | 查 Stage 4 进度 | `GET /api/v1/generation-status/{job_id}` | 轮询 |
 | 查一键工作流进度 | `GET /api/v1/jobs/{job_id}` | `/start-workflow` 返回 job_id 后轮询 |

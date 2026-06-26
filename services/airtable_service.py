@@ -9,8 +9,12 @@ import logging
 import os
 from typing import Any, Optional
 
-from pyairtable import Api
 from requests.exceptions import HTTPError
+
+try:
+    from pyairtable import Api
+except ImportError:  # pragma: no cover - exercised only without optional extra
+    Api = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,16 @@ class AirtableService:
     SHOT_KEYFRAME_AUDIT_COMMENT_FIELD = "关键帧审查意见"       # Long text
     SHOT_KEYFRAME_AUDIT_ATTEMPT_FIELD = "关键帧审查尝试次数"   # Number（级联重试使用，缺失则跳过）
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        if cls is AirtableService:
+            from config import settings
+
+            if settings.DATA_BACKEND == "postgres":
+                from services.database_state_service import DatabaseStateService
+
+                return DatabaseStateService()
+        return super().__new__(cls)
+
     def __init__(self, api_key: str, base_id: str) -> None:
         """
         初始化 Airtable 服务
@@ -59,6 +73,11 @@ class AirtableService:
             api_key: Airtable API 密钥
             base_id: Airtable Base ID
         """
+        if Api is None:
+            raise RuntimeError(
+                "DATA_BACKEND=airtable requires optional dependency pyairtable. "
+                "Install it with: pip install -r requirements-airtable.txt"
+            )
         self.api_key = api_key
         self.base_id = base_id
         self.api = Api(api_key)
