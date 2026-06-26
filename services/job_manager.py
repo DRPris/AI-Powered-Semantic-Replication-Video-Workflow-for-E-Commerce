@@ -6,7 +6,7 @@
 
 import uuid
 import logging
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from enum import Enum
 
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class JobStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
+    QUEUED = "queued"
     PROCESSING = "processing"
     WAITING_REVIEW = "waiting_review"
     WAITING_KEYFRAME_REVIEW = "waiting_keyframe_review"
@@ -57,7 +58,7 @@ class JobManager:
             任务 ID
         """
         job_id = str(uuid.uuid4())
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         self._jobs[job_id] = {
             "id": job_id,
@@ -104,7 +105,7 @@ class JobManager:
             return False
 
         job = self._jobs[job_id]
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         if status is not None:
             status = JobStatus(status)
@@ -209,7 +210,7 @@ class JobManager:
         """
         from datetime import timedelta
         
-        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         to_delete = []
         
         for job_id, job in self._jobs.items():
@@ -235,6 +236,7 @@ class JobManager:
         total = len(self._jobs)
         status_counts = {
             JobStatus.PENDING: 0,
+            JobStatus.QUEUED: 0,
             JobStatus.PROCESSING: 0,
             JobStatus.COMPLETED: 0,
             JobStatus.FAILED: 0,
@@ -249,6 +251,7 @@ class JobManager:
         return {
             "total": total,
             "pending": status_counts[JobStatus.PENDING],
+            "queued": status_counts[JobStatus.QUEUED],
             "processing": status_counts[JobStatus.PROCESSING],
             "completed": status_counts[JobStatus.COMPLETED],
             "failed": status_counts[JobStatus.FAILED],

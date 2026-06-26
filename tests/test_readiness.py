@@ -25,6 +25,7 @@ def _settings(**overrides):
         "ENABLE_AMBIENT_AUDIO": False,
         "SUNO_API_KEY": "",
         "ENABLE_BGM": False,
+        "JOB_BACKEND": "memory",
     }
     values.update(overrides)
     return SimpleNamespace(**values)

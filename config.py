@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     AIRTABLE_API_KEY: str = ""
     AIRTABLE_BASE_ID: str = ""
 
+    # Production persistence and durable jobs
+    DATABASE_URL: str = "postgresql+asyncpg://video:video@postgres:5432/video_replication"
+    REDIS_URL: str = "redis://redis:6379/0"
+    JOB_BACKEND: str = "memory"  # memory | durable
+    JOB_QUEUE_NAME: str = "video-replication:jobs"
+    JOB_LEASE_SECONDS: int = 900
+    JOB_MAX_ATTEMPTS: int = 3
+    WORKER_POLL_TIMEOUT_SECONDS: int = 5
+
     # FFmpeg
     FFMPEG_BIN_PATH: str = "ffmpeg"
     FFMPEG_TEMP_DIR: str = "/tmp/ffmpeg_renders"

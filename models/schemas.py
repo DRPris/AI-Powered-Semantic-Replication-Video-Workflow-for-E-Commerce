@@ -74,6 +74,7 @@ class ReviewStatus(str, Enum):
 class JobStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
+    QUEUED = "queued"
     PROCESSING = "processing"
     WAITING_REVIEW = "waiting_review"
     WAITING_KEYFRAME_REVIEW = "waiting_keyframe_review"

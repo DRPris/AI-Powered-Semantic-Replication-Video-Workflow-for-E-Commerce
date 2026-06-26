@@ -4,6 +4,85 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260626-008] python310_datetime_compat
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+New persistence code used `datetime.UTC`, which is not available in the project's target Python 3.10 runtime.
+
+### Error
+Would fail under CI Python 3.10 with an import error.
+
+### Context
+- Local ad-hoc validation used Python 3.14, which masked the compatibility issue.
+- The Dockerfile and README pin Python 3.10.
+
+### Suggested Fix
+Use `datetime.timezone.utc` for Python 3.10 compatibility.
+
+### Metadata
+- Reproducible: yes
+- Related Files: persistence/models.py, persistence/job_repository.py, services/job_manager.py
+
+---
+
+## [ERR-20260626-007] alembic_sqlite_probe
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Local Alembic validation against SQLite failed before reaching migration execution.
+
+### Error
+`sqlite3.OperationalError: unable to open database file`
+
+### Context
+- The validation command targeted `./tmp/alembic_check.sqlite`.
+- The `tmp/` runtime directory was not present on the host.
+- The initial migration also needed a generic JSON type variant for SQLite probes.
+
+### Suggested Fix
+Create the runtime directory before local SQLite migration validation and use `sa.JSON().with_variant(JSONB, "postgresql")`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: migrations/versions/20260626_0001_initial_production_schema.py
+
+---
+
+## [ERR-20260626-006] persistence_import_coupling
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Persistence tests and Alembic checks imported application settings before core dependencies were installed.
+
+### Error
+`ModuleNotFoundError: No module named 'pydantic_settings'`
+
+### Context
+- The database module and Alembic env imported `config.settings`.
+- Pure persistence tests should not require full application configuration packages.
+
+### Suggested Fix
+Read `DATABASE_URL` directly from the environment in the persistence bootstrap and Alembic env.
+
+### Metadata
+- Reproducible: yes
+- Related Files: persistence/database.py, migrations/env.py
+
+---
+
 ## [ERR-20260626-005] git_init
 
 **Logged**: 2026-06-26T00:00:00+08:00

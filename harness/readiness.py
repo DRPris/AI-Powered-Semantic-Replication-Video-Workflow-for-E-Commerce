@@ -111,3 +111,41 @@ def build_readiness_report(settings: Any, project_root: Path) -> ReadinessReport
         blocking_issues=blocking,
         warnings=warnings,
     )
+
+
+async def check_durable_infrastructure(settings: Any) -> dict[str, dict[str, Any]]:
+    """Ping PostgreSQL and Redis when the durable job backend is enabled."""
+    if settings.JOB_BACKEND != "durable":
+        return {}
+
+    checks: dict[str, dict[str, Any]] = {}
+    try:
+        from sqlalchemy import text
+
+        from persistence.database import get_session_factory
+
+        async with get_session_factory()() as session:
+            await session.execute(text("SELECT 1"))
+        checks["database"] = {"passed": True}
+    except Exception as exc:
+        checks["database"] = {
+            "passed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        from services.durable_queue import DurableJobQueue
+
+        queue = DurableJobQueue(settings.REDIS_URL, settings.JOB_QUEUE_NAME)
+        try:
+            passed = await queue.ping()
+        finally:
+            await queue.close()
+        checks["redis"] = {"passed": passed}
+    except Exception as exc:
+        checks["redis"] = {
+            "passed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return checks

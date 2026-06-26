@@ -29,13 +29,18 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Syntax check (compileall)
-        run: python -m compileall -q agents harness models prompts services workflows scripts tests main.py config.py
+        run: python -m compileall -q agents harness models persistence prompts services workflows scripts tests main.py worker.py config.py
 
       - name: Lint production baseline
-        run: ruff check harness tests services/job_manager.py --output-format=github
+        run: ruff check harness persistence services/durable_queue.py services/durable_job_service.py services/job_manager.py tests worker.py --output-format=github
 
       - name: Unit tests
         run: pytest -q
+
+      - name: Migration smoke test
+        run: |
+          mkdir -p tmp
+          DATABASE_URL=sqlite+aiosqlite:///./tmp/alembic_check.sqlite alembic upgrade head
 
   build-docker:
     name: Build Docker Image

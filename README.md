@@ -42,6 +42,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+本地开发建议使用 `.python-version` 指定的 Python 3.10。不要直接用系统默认 `python3`，否则在 Python 3.14 等环境下依赖可能无法安装。
+
 ### 3. 配置
 
 ```bash
@@ -195,11 +197,20 @@ POST /api/v1/projects/{id}/start  body: {"mode": "full"}
 
 ## 部署
 
-推荐 Docker 部署。容器健康检查使用 `/ready`，只有核心配置、FFmpeg 和运行目录均就绪时才返回 200。注意：
+推荐 Docker 部署。当前 Compose 栈包含 FastAPI、Worker、PostgreSQL、Redis 和迁移任务。容器健康检查使用 `/ready`，只有核心配置、FFmpeg、运行目录和持久化基础设施均就绪时才返回 200。注意：
 - FFmpeg 必须在容器中可用
 - `tmp/` 目录需要可写
 - OSS Endpoint 与 Bucket 区域需一致
 - 海外 API（Gemini/ElevenLabs/Tripo3D）若部署在国内服务器需配置代理
+
+生产任务后端：
+
+```bash
+JOB_BACKEND=durable  # PostgreSQL + Redis + worker
+JOB_BACKEND=memory   # 本地开发回退，不可用于生产
+```
+
+更多说明见 [docs/production-infrastructure.md](docs/production-infrastructure.md)。
 
 基础存活检查与部署就绪检查：
 

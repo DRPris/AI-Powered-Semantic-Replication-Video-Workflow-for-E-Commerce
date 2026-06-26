@@ -1,4 +1,45 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-video_replication}
+      POSTGRES_USER: ${POSTGRES_USER:-video}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-video}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-video} -d ${POSTGRES_DB:-video_replication}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: semantic-video-replication:latest
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://video:video@postgres:5432/video_replication}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   video-replication:
     build:
       context: .
@@ -8,6 +49,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      JOB_BACKEND: ${JOB_BACKEND:-durable}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://video:video@postgres:5432/video_replication}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     ports:
       - "${SERVICE_PORT:-8000}:8000"
     volumes:
@@ -21,9 +66,38 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  workflow-worker:
+    image: semantic-video-replication:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      JOB_BACKEND: durable
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://video:video@postgres:5432/video_replication}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command: ["python", "worker.py"]
+    volumes:
+      - ./tmp:/app/tmp
+      - ./static:/app/static
+      - ./scripts/output:/app/scripts/output
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 # 备注：
 # 1. 使用前先 `cp .env.example .env` 并填入真实密钥
 # 2. 启动：`docker compose up -d --build`
 # 3. 查看日志：`docker compose logs -f video-replication`
 # 4. 海外 API 走代理时，可在 .env 中配置 HTTP_PROXY / HTTPS_PROXY
+
+volumes:
+  postgres_data:
+  redis_data:

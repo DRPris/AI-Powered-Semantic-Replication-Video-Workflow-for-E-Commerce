@@ -44,12 +44,18 @@ from workflows import (
     run_stage4,
     run_clip_editing,
     run_stage5,
+    run_full_workflow,
 )
 from services.airtable_service import AirtableService
 from services.ffmpeg_service import FFmpegService
 from services.oss_service import OSSService
 from services.token_tracker import token_tracker
-from harness import InputValidationError, build_readiness_report, validate_public_http_url
+from harness import (
+    InputValidationError,
+    build_readiness_report,
+    check_durable_infrastructure,
+    validate_public_http_url,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -151,9 +157,19 @@ async def health_check() -> dict[str, str]:
 async def readiness_check() -> JSONResponse:
     """部署就绪检查：验证配置、FFmpeg 和运行目录，不调用付费外部 API。"""
     report = build_readiness_report(settings=settings, project_root=PROJECT_ROOT)
+    content = report.as_dict()
+    infrastructure = await check_durable_infrastructure(settings)
+    if infrastructure:
+        content["checks"].update(infrastructure)
+        failed = [name for name, check in infrastructure.items() if not check["passed"]]
+        if failed:
+            content["ready"] = False
+            content["blocking_issues"].append(
+                f"持久化基础设施不可用: {', '.join(failed)}"
+            )
     return JSONResponse(
-        status_code=200 if report.ready else 503,
-        content=report.as_dict(),
+        status_code=200 if content["ready"] else 503,
+        content=content,
     )
 
 
@@ -244,7 +260,24 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
     """
     from services.job_manager import job_manager
 
+    durable_jobs = None
     try:
+        if settings.JOB_BACKEND == "durable":
+            from services.durable_job_service import DurableJobService
+
+            durable_jobs = DurableJobService()
+            existing = await durable_jobs.find_existing_workflow(request.project_id)
+            if existing is not None:
+                existing_project, existing_job = existing
+                await durable_jobs.close()
+                return {
+                    "project_id": existing_project.airtable_record_id,
+                    "job_id": str(existing_job.id),
+                    "status": existing_job.status,
+                    "message": "相同 project_id 的任务已存在，返回原任务",
+                    "idempotent_replay": True,
+                }
+
         # 创建项目记录
         project = await airtable_service.create_project(
             name=request.project_name if request.project_name else f"project_{request.project_id}",
@@ -293,184 +326,50 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                 logger.error(f"[{project_id}] 处理用户上传的三视图失败: {e}", exc_info=True)
                 # 不阻塞工作流，继续执行
 
-        # 创建后台任务
-        job_id = job_manager.create_job()
+        if settings.JOB_BACKEND == "durable":
+            _, durable_job = await durable_jobs.create_workflow_job(
+                external_project_id=request.project_id,
+                airtable_record_id=project_id,
+                name=request.project_name or f"project_{request.project_id}",
+                mode=request.mode.value,
+                video_url=request.video_url,
+                product_image_url=request.product_image_url,
+                product_listing_url=request.product_listing_url,
+                payload={
+                    "project_id": project_id,
+                    "video_url": request.video_url,
+                    "product_image_url": request.product_image_url,
+                    "mode": request.mode.value,
+                    "product_listing_url": request.product_listing_url,
+                    "replicate_hook": request.replicate_hook,
+                },
+            )
+            job_id = str(durable_job.id)
+            await durable_jobs.close()
+            durable_jobs = None
+        else:
+            job_id = job_manager.create_job(
+                job_type="full_workflow",
+                metadata={"project_id": project_id},
+            )
 
-        async def _run_workflow():
-            try:
-                job_manager.update_job(job_id, status=JobStatus.PROCESSING, progress=0.1)
+            async def _update_memory_job(**values: Any) -> None:
+                error_message = values.pop("error_message", None)
+                values.pop("error_code", None)
+                if error_message is not None:
+                    values["error"] = error_message
+                job_manager.update_job(job_id, **values)
 
-                # 阶段一：素材分析
-                logger.info(f"[{project_id}] 开始阶段一：素材分析")
-                stage1_result = await run_stage1(
-                    project_id=project_id,
-                    video_url=request.video_url,
-                    product_image_url=request.product_image_url,
-                    mode=request.mode,
-                    product_listing_url=request.product_listing_url
-                )
-                job_manager.update_job(job_id, status=JobStatus.PROCESSING, progress=0.3)
-
-                # Hook 检测逻辑：确定是否复刻 hook
-                replicate_hook = request.replicate_hook
-                has_hook = False
-                hook_shot_numbers = []
-
-                # 从 Stage 1 结果中提取 hook 信息
-                video_analysis_result = stage1_result.get("video_analysis", {})
-                if isinstance(video_analysis_result, dict):
-                    has_hook = video_analysis_result.get("has_hook", False)
-                    hook_shot_numbers = video_analysis_result.get("hook_shot_numbers", [])
-                    # 也检查 shots 中的 shot_type
-                    if not has_hook:
-                        for shot in video_analysis_result.get("shots", []):
-                            action = shot.get("action", {})
-                            if isinstance(action, dict) and action.get("shot_type") == "hook":
-                                has_hook = True
-                                hook_shot_numbers.append(shot.get("shot_number", 0))
-
-                # 详细的 shot_type 分类日志
-                shots_list = video_analysis_result.get("shots", [])
-                shot_type_summary = []
-                for shot in shots_list:
-                    sn = shot.get("shot_number", "?")
-                    action = shot.get("action", {})
-                    st = action.get("shot_type", "unknown") if isinstance(action, dict) else "unknown"
-                    shot_type_summary.append(f"shot_{sn}={st}")
-                logger.info(
-                    f"[{project_id}] Shot type 分类详情: {', '.join(shot_type_summary)}"
-                )
-
-                logger.info(
-                    f"[{project_id}] Hook 检测结果: has_hook={has_hook}, "
-                    f"hook_shots={hook_shot_numbers}, replicate_hook={replicate_hook}"
-                )
-
-                # 如果用户未指定且检测到 hook，默认复刻 hook
-                if replicate_hook is None:
-                    if has_hook:
-                        replicate_hook = True
-                        logger.info(f"[{project_id}] 检测到 hook 镜头，默认复刻 hook")
-                    else:
-                        replicate_hook = False
-                        logger.info(f"[{project_id}] 未检测到 hook 镜头")
-
-                # 阶段二：脚本生成
-                logger.info(f"[{project_id}] 开始阶段二：脚本生成 (replicate_hook={replicate_hook})")
-                stage2_result = await run_stage2(
-                    project_id=project_id,
-                    mode=request.mode,
-                    replicate_hook=replicate_hook
-                )
-                job_manager.update_job(job_id, status=JobStatus.PROCESSING, progress=0.5)
-
-                # 阶段三：提示词生成
-                logger.info(f"[{project_id}] 开始阶段三：提示词生成")
-                stage3_result = await run_stage3(project_id=project_id, mode=request.mode)
-                job_manager.update_job(job_id, status=JobStatus.PROCESSING, progress=0.65)
-
-                # 阶段 3.5：关键帧生成（如果启用）
-                if settings.ENABLE_KEYFRAME_STAGE:
-                    logger.info(f"[{project_id}] 开始阶段 3.5：关键帧生成")
-                    stage3_5_result = await run_stage3_5(project_id=project_id)
-                    skipped = stage3_5_result.get("skipped", False)
-                    if not skipped:
-                        # 关键帧生成完成，暂停等待人工审核关键帧
-                        job_manager.update_job(
-                            job_id,
-                            status=JobStatus.WAITING_KEYFRAME_REVIEW,
-                            progress=0.7,
-                            result={
-                                "project_id": project_id,
-                                "message": "关键帧生成完成，请在 Airtable 中审核关键帧",
-                                "next_step": "审核通过后调用 POST /api/v1/projects/{project_id}/approve-keyframes 继续",
-                                "keyframe_result": {
-                                    "total": stage3_5_result.get("total_shots", 0),
-                                    "successful": stage3_5_result.get("successful", 0),
-                                    "failed": stage3_5_result.get("failed", 0),
-                                },
-                            }
-                        )
-                        logger.info(f"[{project_id}] 关键帧生成完成，等待人工审核")
-                        return  # 暂停工作流，等待 approve-keyframes 端点触发后续阶段
-                    else:
-                        logger.info(f"[{project_id}] 关键帧阶段已跳过（配置关闭）")
-                else:
-                    logger.info(f"[{project_id}] ENABLE_KEYFRAME_STAGE=False，跳过阶段 3.5")
-
-                job_manager.update_job(job_id, status=JobStatus.PROCESSING, progress=0.7)
-
-                # 阶段三完成后，检查验证结果决定是否自动跳过人审
-                validation = {}
-                script_data = stage2_result.get("script", {}) if stage2_result else {}
-                validation = script_data.get("_validation", {})
-                # Stage 3 分镜提示词自审核结果
-                audit_summary = stage3_result.get("audit_summary", {}) if isinstance(stage3_result, dict) else {}
-                rejected_count = audit_summary.get("rejected_count", 0)
-                script_passed = (
-                    validation.get("passed", False)
-                    and validation.get("confidence", 0.0) >= 0.85
-                )
-                auto_passed = script_passed and rejected_count == 0
-
-                if auto_passed:
-                    # 验证通过且置信度足够高，且分镜自审核无驳回，自动触发 Stage 4
-                    logger.info(
-                        f"[{project_id}] 脚本验证通过 (confidence={validation.get('confidence', 0):.2f}) "
-                        f"且分镜自审核全部通过（rejected=0），自动跳过人审，触发 Stage 4"
-                    )
-                    job_manager.update_job(
-                        job_id, status=JobStatus.PROCESSING, progress=0.75,
-                        result={"project_id": project_id, "message": "脚本验证与分镜自审核均通过，自动进入视频生成"}
-                    )
-
-                    # 注：Stage 3 已按镜头写入 “已通过/已驳回” 状态；这里不再无差别覆写。
-                    # Stage 4 仅拉取 “提示词审核状态==已通过” 的分镜（stage4_generation.py 已有过滤）。
-
-                    # 阶段四：视频生成
-                    logger.info(f"[{project_id}] 开始阶段四：视频生成（自动触发）")
-                    await run_stage4(project_id=project_id, platform="seedance")
-                    job_manager.update_job(
-                        job_id, status=JobStatus.COMPLETED, progress=1.0,
-                        result={
-                            "project_id": project_id,
-                            "message": "全流程自动完成（验证通过，跳过人审）",
-                            "auto_validated": True,
-                            "validation_confidence": validation.get("confidence", 0.0)
-                        }
-                    )
-                    logger.info(f"[{project_id}] 全流程自动完成")
-                else:
-                    # 验证未通过、置信度不够、或分镜自审核有驳回 → 进入人工审核
-                    if not script_passed:
-                        reason = "无脚本验证结果" if not validation else (
-                            f"脚本验证 passed={validation.get('passed')}, confidence={validation.get('confidence', 0):.2f}"
-                        )
-                    else:
-                        reason = (
-                            f"分镜提示词自审核驳回 {rejected_count} 个镜头: "
-                            f"{audit_summary.get('rejected_shot_numbers', [])}"
-                        )
-                    logger.info(f"[{project_id}] 需要人工审核: {reason}")
-                    job_manager.update_job(
-                        job_id,
-                        status=JobStatus.WAITING_REVIEW,
-                        progress=0.7,
-                        result={
-                            "project_id": project_id,
-                            "message": "阶段一~三已完成，请在 Airtable 中审核提示词",
-                            "next_step": "审核通过后调用 POST /api/v1/generate-shots 开始视频生成",
-                            "validation": validation,
-                            "audit_summary": audit_summary,
-                        }
-                    )
-                    logger.info(f"[{project_id}] 阶段一~三完成，等待人工审核提示词")
-
-            except Exception as e:
-                logger.error(f"[{project_id}] 工作流执行失败: {e}", exc_info=True)
-                job_manager.update_job(job_id, status=JobStatus.FAILED, error=str(e))
-
-        background_tasks.add_task(_run_workflow)
+            background_tasks.add_task(
+                run_full_workflow,
+                project_id=project_id,
+                video_url=request.video_url,
+                product_image_url=request.product_image_url,
+                mode=request.mode,
+                product_listing_url=request.product_listing_url,
+                replicate_hook=request.replicate_hook,
+                update_job=_update_memory_job,
+            )
 
         return {
             "project_id": project_id,
@@ -481,6 +380,8 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
         }
 
     except Exception as e:
+        if durable_jobs is not None:
+            await durable_jobs.close()
         logger.error(f"启动工作流失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"启动工作流失败: {str(e)}")
 
@@ -489,6 +390,29 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
 async def get_job_status(job_id: str) -> JobStatusResponse:
     """统一查询一键工作流任务状态。"""
     from services.job_manager import job_manager
+
+    if settings.JOB_BACKEND == "durable":
+        from services.durable_job_service import DurableJobService
+
+        durable_jobs = DurableJobService()
+        try:
+            job = await durable_jobs.get(job_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        finally:
+            await durable_jobs.close()
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        return JobStatusResponse(
+            job_id=str(job.id),
+            status=job.status,
+            progress=job.progress,
+            result=job.result,
+            message=job.error_message
+            or ((job.result or {}).get("message") if job.result else None),
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
 
     job = job_manager.get_job(job_id)
     if not job:
