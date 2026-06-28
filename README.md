@@ -60,6 +60,7 @@ cp .env.example .env
 | `KLING_ACCESS_KEY` / `KLING_SECRET_KEY` | 首尾双锚定视频平台（可选） | https://klingai.com/dev-center |
 | `DATABASE_URL` / `REDIS_URL` | 生产状态库与任务队列 | Docker Compose 默认提供 |
 | `API_KEYS` | API 访问密钥，保护高成本接口 | 自行生成强随机字符串 |
+| `PROJECT_BUDGET_USD` / `DAILY_BUDGET_USD` | 项目级/日级成本上限 | 自行按预算配置 |
 | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_BUCKET_NAME` | 素材存储 | https://oss.console.aliyun.com |
 
 可选：`TAVILY_API_KEY`（商品品牌检索）、`ELEVENLABS_API_KEY`（环境音）、`SUNO_API_KEY`（BGM）、`WAN_API_KEY`（兜底）。
@@ -150,6 +151,22 @@ Authorization: Bearer key1
 ```
 
 `/health` 和 `/ready` 不需要鉴权，便于负载均衡和容器健康检查。开发环境如需临时关闭，可设置 `API_AUTH_ENABLED=false`；生产不建议关闭。
+
+## 成本治理
+
+生产默认将 token 与估算成本明细写入 PostgreSQL `token_usage` 表，并保留旧 JSON 记录作为本地兼容 fallback。
+
+关键配置：
+
+- `COST_TRACKING_BACKEND=database`
+- `ENABLE_COST_GUARD=true`
+- `PROJECT_BUDGET_USD=20`
+- `DAILY_BUDGET_USD=50`
+
+当项目累计成本或当日总成本达到预算上限时，高成本入口会返回 `402`，避免继续触发模型调用。成本查询接口：
+
+- `GET /api/v1/token-usage/{project_id}`
+- `GET /api/v1/token-usage`
 
 ---
 

@@ -32,7 +32,7 @@ jobs:
         run: python -m compileall -q agents harness models persistence prompts services workflows scripts tests main.py worker.py config.py
 
       - name: Lint production baseline
-        run: ruff check harness persistence services/durable_queue.py services/durable_job_service.py services/job_manager.py services/database_state_service.py services/airtable_service.py agents/clip_editor_agent.py services/ffmpeg_service.py workflows/full_workflow.py tests worker.py --output-format=github
+        run: ruff check harness persistence services/durable_queue.py services/durable_job_service.py services/job_manager.py services/database_state_service.py services/airtable_service.py services/token_tracker.py services/cost_guard.py agents/clip_editor_agent.py services/ffmpeg_service.py workflows/full_workflow.py tests worker.py --output-format=github
 
       - name: Unit tests
         run: pytest -q

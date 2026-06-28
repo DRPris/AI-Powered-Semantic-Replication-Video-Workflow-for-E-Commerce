@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     JOB_MAX_ATTEMPTS: int = 3
     WORKER_POLL_TIMEOUT_SECONDS: int = 5
 
+    # Cost governance
+    COST_TRACKING_BACKEND: str = "database"  # database | json
+    ENABLE_COST_GUARD: bool = True
+    PROJECT_BUDGET_USD: float = 20.0
+    DAILY_BUDGET_USD: float = 50.0
+
     # FFmpeg
     FFMPEG_BIN_PATH: str = "ffmpeg"
     FFMPEG_TEMP_DIR: str = "/tmp/ffmpeg_renders"

@@ -48,6 +48,7 @@ from workflows.full_workflow import run_post_generation
 from services.airtable_service import AirtableService
 from services.ffmpeg_service import FFmpegService
 from services.oss_service import OSSService
+from services.cost_guard import CostBudgetExceeded, assert_cost_budget_available
 from services.token_tracker import token_tracker
 from harness import (
     InputValidationError,
@@ -277,6 +278,7 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
 
     durable_jobs = None
     try:
+        await assert_cost_budget_available(settings, request.project_id)
         if settings.JOB_BACKEND == "durable":
             from services.durable_job_service import DurableJobService
 
@@ -409,6 +411,10 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
             "replicate_hook": request.replicate_hook,
         }
 
+    except CostBudgetExceeded as e:
+        if durable_jobs is not None:
+            await durable_jobs.close()
+        raise HTTPException(status_code=402, detail=str(e))
     except Exception as e:
         if durable_jobs is not None:
             await durable_jobs.close()
@@ -719,6 +725,11 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
 
     基于提示词批量生成所有分镜的视频片段
     """
+    try:
+        await assert_cost_budget_available(settings, request.project_id)
+    except CostBudgetExceeded as e:
+        raise HTTPException(status_code=402, detail=str(e))
+
     if settings.JOB_BACKEND == "durable":
         from services.durable_job_service import DurableJobService
 
@@ -906,6 +917,11 @@ async def compose_video(
 
     将所有审核通过的分镜视频片段合成为完整的最终视频
     """
+    try:
+        await assert_cost_budget_available(settings, request.project_id)
+    except CostBudgetExceeded as e:
+        raise HTTPException(status_code=402, detail=str(e))
+
     if settings.JOB_BACKEND == "durable":
         from services.durable_job_service import DurableJobService
 
@@ -1236,6 +1252,7 @@ async def approve_keyframes(
     logger.info(f"Approving keyframes for project: {project_id}")
 
     try:
+        await assert_cost_budget_available(settings, project_id)
         # 验证项目存在
         project = await airtable_service.get_project(project_id)
         if not project:
@@ -1363,6 +1380,8 @@ async def approve_keyframes(
 
     except HTTPException:
         raise
+    except CostBudgetExceeded as e:
+        raise HTTPException(status_code=402, detail=str(e))
     except Exception as e:
         logger.error(f"Approve keyframes failed for project {project_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"关键帧审核通过操作失败: {str(e)}")
@@ -1376,8 +1395,8 @@ async def approve_keyframes(
 @app.get("/api/v1/token-usage/{project_id}")
 async def get_token_usage_by_project(project_id: str):
     """查询单个项目的 Token 消耗明细"""
-    summary = token_tracker.get_project_summary(project_id)
-    records = token_tracker.get_project_records(project_id)
+    summary = await token_tracker.get_project_summary_async(project_id)
+    records = await token_tracker.get_project_records_async(project_id)
     return {
         "summary": summary,
         "records": records,
@@ -1387,7 +1406,7 @@ async def get_token_usage_by_project(project_id: str):
 @app.get("/api/v1/token-usage")
 async def get_token_usage_global(limit: int = Query(default=50, ge=1, le=200)):
     """查询全局 Token 消耗汇总（按项目统计）"""
-    result = token_tracker.get_all_summary(limit=limit)
+    result = await token_tracker.get_all_summary_async(limit=limit)
     return result
 
 

@@ -206,3 +206,30 @@ class FailureEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
+
+
+class TokenUsageRecord(Base):
+    __tablename__ = "token_usage"
+    __table_args__ = (
+        Index("ix_token_usage_project_created", "project_id", "created_at"),
+        Index("ix_token_usage_stage_model", "stage", "model"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    stage: Mapped[str] = mapped_column(String(64), index=True)
+    call_type: Mapped[str] = mapped_column(String(128), index=True)
+    model: Mapped[str] = mapped_column(String(128), index=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached: Mapped[bool] = mapped_column(default=False)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON_TYPE, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )

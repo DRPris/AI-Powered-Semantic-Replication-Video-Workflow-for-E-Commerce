@@ -80,6 +80,23 @@ Every route except `/health` and `/ready` requires either `X-API-Key` or
 `Authorization: Bearer`. This protects endpoints that can trigger model spend or
 expose project assets/status.
 
+## Cost governance
+
+Token usage and estimated model cost are persisted to PostgreSQL in the
+`token_usage` table. The legacy JSON files under `tmp/token_stats` remain as a
+local fallback for older runs.
+
+Budget controls:
+
+- `ENABLE_COST_GUARD=true`
+- `PROJECT_BUDGET_USD=<per-project ceiling>`
+- `DAILY_BUDGET_USD=<global daily ceiling>`
+
+The guard is checked before expensive workflow entry points such as
+`/start-workflow`, `/generate-shots`, `/approve-keyframes` and `/compose-video`.
+When a budget is exhausted, the API returns HTTP `402` and does not enqueue new
+model work.
+
 ## Migration
 
 ```bash

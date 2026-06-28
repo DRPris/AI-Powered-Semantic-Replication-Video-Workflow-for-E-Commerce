@@ -4,6 +4,34 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260626-011] ruff_test_clip_editor_unused_imports
+
+**Logged**: 2026-06-26T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Expanded Ruff scope surfaced unused imports in `tests/test_clip_editor_agent.py`.
+
+### Error
+```
+F401 asyncio / AsyncMock / unused constants imported but unused
+```
+
+### Context
+- Command: `.venv/bin/ruff check ... tests ...`
+- Resolution: remove unused imports only; no behavior change.
+
+### Suggested Fix
+Keep test imports minimal when adding new unit tests or expanding lint scope.
+
+### Metadata
+- Reproducible: yes
+- Related Files: tests/test_clip_editor_agent.py
+
+---
+
 ## [ERR-20260626-010] pytest_imported_config_from_lightweight_tests
 
 **Logged**: 2026-06-26T00:00:00+08:00

@@ -2,16 +2,20 @@
 Token 消耗追踪服务
 
 按 project_id + stage + call_type 维度记录每次 AI 调用的 Token 消耗，
-JSON 文件本地持久化，并支持汇总查询与 Airtable 同步。
+PostgreSQL 持久化为生产默认，同时保留 JSON 文件兼容旧本地记录。
 """
 
+import asyncio
 import json
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from persistence.database import get_session_factory
+from persistence.token_usage_repository import TokenUsageRepository, summarize_records
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +90,7 @@ class TokenTracker:
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
             "cached": cached,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         # 计算估算费用 (USD)
@@ -101,6 +105,7 @@ class TokenTracker:
 
         # 持久化到 JSON 文件
         self._append_to_file(project_id, entry)
+        self._write_to_database(entry)
 
         logger.info(
             f"[TokenTracker] {project_id}/{stage}/{call_type}: "
@@ -127,6 +132,23 @@ class TokenTracker:
                 json.dumps(records, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+
+    async def _record_database_async(self, entry: dict[str, Any]) -> None:
+        try:
+            repository = TokenUsageRepository(get_session_factory())
+            await repository.record(entry)
+        except Exception as exc:
+            logger.warning("Token usage database write failed; JSON fallback kept: %s", exc)
+
+    def _write_to_database(self, entry: dict[str, Any]) -> None:
+        if os.getenv("COST_TRACKING_BACKEND", "database").lower() != "database":
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._record_database_async(entry))
+            return
+        loop.create_task(self._record_database_async(entry))
 
     def get_project_records(self, project_id: str) -> list[dict]:
         """获取项目的所有 Token 消耗记录"""
@@ -162,73 +184,21 @@ class TokenTracker:
             }
         """
         records = self.get_project_records(project_id)
-        if not records:
-            return {
-                "project_id": project_id,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_tokens": 0,
-                "total_cost_usd": 0.0,
-                "call_count": 0,
-                "cache_hit_count": 0,
-                "by_stage": {},
-                "by_model": {},
-            }
+        return summarize_records(project_id, records)
 
-        summary = {
-            "project_id": project_id,
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_tokens": 0,
-            "total_cost_usd": 0.0,
-            "call_count": len(records),
-            "cache_hit_count": 0,
-            "by_stage": {},
-            "by_model": {},
-        }
+    async def get_project_records_async(
+        self, project_id: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        repository = TokenUsageRepository(get_session_factory())
+        records = await repository.project_records(project_id, limit=limit)
+        return records or self.get_project_records(project_id)
 
-        for r in records:
-            inp = r.get("input_tokens", 0)
-            out = r.get("output_tokens", 0)
-            cost = r.get("estimated_cost_usd", 0.0)
-            stage = r.get("stage", "unknown")
-            model = r.get("model", "unknown")
-
-            summary["total_input_tokens"] += inp
-            summary["total_output_tokens"] += out
-            summary["total_tokens"] += inp + out
-            summary["total_cost_usd"] += cost
-            if r.get("cached"):
-                summary["cache_hit_count"] += 1
-
-            # by_stage
-            if stage not in summary["by_stage"]:
-                summary["by_stage"][stage] = {
-                    "input_tokens": 0, "output_tokens": 0,
-                    "total_tokens": 0, "cost_usd": 0.0, "call_count": 0,
-                }
-            s = summary["by_stage"][stage]
-            s["input_tokens"] += inp
-            s["output_tokens"] += out
-            s["total_tokens"] += inp + out
-            s["cost_usd"] += cost
-            s["call_count"] += 1
-
-            # by_model
-            if model not in summary["by_model"]:
-                summary["by_model"][model] = {
-                    "input_tokens": 0, "output_tokens": 0,
-                    "total_tokens": 0, "cost_usd": 0.0, "call_count": 0,
-                }
-            m = summary["by_model"][model]
-            m["input_tokens"] += inp
-            m["output_tokens"] += out
-            m["total_tokens"] += inp + out
-            m["cost_usd"] += cost
-            m["call_count"] += 1
-
-        summary["total_cost_usd"] = round(summary["total_cost_usd"], 6)
-        return summary
+    async def get_project_summary_async(self, project_id: str) -> dict[str, Any]:
+        repository = TokenUsageRepository(get_session_factory())
+        summary = await repository.project_summary(project_id)
+        if summary.get("call_count", 0):
+            return summary
+        return self.get_project_summary(project_id)
 
     def get_all_summary(self, limit: int = 50) -> dict[str, Any]:
         """
@@ -268,6 +238,13 @@ class TokenTracker:
             "projects": projects,
             "global_total": global_total,
         }
+
+    async def get_all_summary_async(self, limit: int = 50) -> dict[str, Any]:
+        repository = TokenUsageRepository(get_session_factory())
+        result = await repository.global_summary(limit=limit)
+        if result.get("global_total", {}).get("total_calls", 0):
+            return result
+        return self.get_all_summary(limit=limit)
 
 
 # 全局单例
