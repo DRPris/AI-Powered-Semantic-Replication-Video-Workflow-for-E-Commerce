@@ -42,6 +42,9 @@ MIN_SHOT_DURATION = 1.0
 # 变速倍率硬上限（Phase 3）
 MAX_SPEED_MULTIPLIER = 1.5
 
+# 节拍吸附半径（秒）：裁剪点距离节拍 <= 此值时才吸附
+BEAT_SNAP_RADIUS = 0.15
+
 
 class ClipEditorAgent:
     """复刻剪辑 Agent
@@ -74,6 +77,13 @@ class ClipEditorAgent:
         self.gemini = gemini_service
         self.enable_llm_semantic_pick = enable_llm_semantic_pick
         self.enable_speed_adjust = enable_speed_adjust
+
+        # 从节奏分析中提取节拍时间轴（已排序），用于裁剪点吸附
+        audio = self.rhythm_analysis.get("audio") or {}
+        raw_beats = audio.get("beat_positions_sec") or []
+        self._beat_positions: list[float] = sorted(
+            float(b) for b in raw_beats if isinstance(b, (int, float)) and b >= 0
+        )
 
     # ------------------------------------------------------------------
     # Public entry
@@ -141,6 +151,10 @@ class ClipEditorAgent:
                     target_duration=tgt_dur,
                     reasoning=f"规划异常降级: {e}",
                 )
+
+            # 节拍吸附：裁剪点对齐到最近的 beat_positions_sec
+            plan = self._apply_beat_snap(plan, idx, warnings)
+
             edit_plans.append(plan)
 
         src_total = sum(source_durations)
@@ -333,6 +347,85 @@ class ClipEditorAgent:
             target_duration=target_duration,
             reasoning=f"Phase 1 规则层：从头裁剪 {source_duration:.2f}s -> {target_duration:.2f}s",
         )
+
+    # ------------------------------------------------------------------
+    # 节拍吸附（Beat Snap）
+    # ------------------------------------------------------------------
+
+    def _apply_beat_snap(
+        self, plan: EditPlan, shot_index: int, warnings: list[str]
+    ) -> EditPlan:
+        """将 plan 中 trim 的起止点吸附到最近的节拍位置。
+
+        只在以下条件同时满足时吸附：
+        1. plan 有 trim 区间
+        2. 存在有效的 beat_positions 数据
+        3. 原镜头标记为 beat_aligned（来自 rhythm_analysis）
+        4. 吸附距离 <= BEAT_SNAP_RADIUS
+
+        吸附后会修正 trim 区间并更新 reasoning。
+        """
+        if not plan.trim or not self._beat_positions:
+            return plan
+
+        # 检查该镜头是否被标记为需要节拍对齐
+        ra_shots = self.rhythm_analysis.get("shots") or []
+        shot_ra = ra_shots[shot_index] if shot_index < len(ra_shots) else {}
+        if not shot_ra.get("beat_aligned", False):
+            return plan
+
+        start = float(plan.trim.start_sec)
+        end = float(plan.trim.end_sec)
+        snapped_start = self._snap_to_beat(start)
+        snapped_end = self._snap_to_beat(end)
+        changed = False
+
+        if snapped_start != start:
+            start = snapped_start
+            changed = True
+        if snapped_end != end:
+            end = snapped_end
+            changed = True
+
+        if not changed:
+            return plan
+
+        # 安全校验：吸附后的 start 不能 >= end，end 不能超过 source
+        if start >= end or end > plan.source_duration:
+            return plan
+
+        snapped_dur = end - start
+        if snapped_dur < MIN_SHOT_DURATION:
+            return plan
+
+        plan.trim = EditTrim(start_sec=round(start, 3), end_sec=round(end, 3))
+        snap_note = f" [节拍吸附: {start:.3f}s-{end:.3f}s]"
+        plan.reasoning = (plan.reasoning or "") + snap_note
+        logger.debug(
+            f"[ClipEditorAgent] 镜头 {plan.shot_number} 裁剪点节拍吸附: {snap_note}"
+        )
+        return plan
+
+    def _snap_to_beat(self, time_sec: float) -> float:
+        """将时间点吸附到最近的节拍位置（在 BEAT_SNAP_RADIUS 内）。"""
+        if not self._beat_positions:
+            return time_sec
+
+        import bisect
+        idx = bisect.bisect_left(self._beat_positions, time_sec)
+        candidates = []
+        if idx > 0:
+            candidates.append(self._beat_positions[idx - 1])
+        if idx < len(self._beat_positions):
+            candidates.append(self._beat_positions[idx])
+
+        if not candidates:
+            return time_sec
+
+        nearest = min(candidates, key=lambda b: abs(b - time_sec))
+        if abs(nearest - time_sec) <= BEAT_SNAP_RADIUS:
+            return nearest
+        return time_sec
 
     # ------------------------------------------------------------------
     # Plan 构造器

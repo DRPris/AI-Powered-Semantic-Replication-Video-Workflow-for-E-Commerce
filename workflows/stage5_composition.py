@@ -25,14 +25,13 @@ from typing import Any, Optional
 import httpx
 
 from config import settings
-from models.schemas import ProjectStatus, ShotStatus
 from services.ffmpeg_service import FFmpegService, detect_transition_frame, crop_video_from_time
 from services.oss_service import OSSService
 from services.airtable_service import AirtableService
 from services.suno_service import SunoService
 from services.sound_effect_service import SoundEffectService
 from services.qwen_service import QwenService
-from services.ost_service import apply_ost_overlay, extract_subtitle_entries
+from services.ost_service import apply_ost_overlay
 from services.ost_localizer import (
     localize_osts,
     apply_localization_inplace,
@@ -350,16 +349,17 @@ async def run_stage5(
         else:
             logger.info("skip_clip_editing=True，跳过 edit_plan 应用")
 
-        # 智能裁剪：第一个非 Hook 镜头需要裁剪（使用了三视图首帧）
-        # 已应用 edit_plan 的镜头不再进入此分支
+        # 过渡检测：第一个非 Hook 镜头需要裁剪掉三视图首帧。
+        # 设计：
+        # - 已应用 edit_plan 且 trim.start_sec > 0 的镜头跳过（edit_plan 已包含裁剪起点）
+        # - 未应用 edit_plan 的镜头走原有独立 crop 逻辑
+        # - 已应用 edit_plan 但 trim.start_sec == 0 的镜头：
+        #   将过渡检测结果合并进 edit_plan 的 start_sec（避免多余编码）
         first_product_shot_found = False
         for i, (shot, video_path) in enumerate(zip(approved_shots, downloaded_files)):
             shot_fields = shot.get("fields", {})
-            
-            # 获取镜头类型（从生成提示词或 metadata 中解析）
             shot_type = _get_shot_type_from_fields(shot_fields)
-            
-            # 规则推断：第一个非 Hook 镜头需要裁剪
+
             if not first_product_shot_found and shot_type != "hook":
                 needs_crop = True
                 first_product_shot_found = True
@@ -367,35 +367,50 @@ async def run_stage5(
                 needs_crop = False
                 if shot_type != "hook":
                     first_product_shot_found = True
-            
+
             if not needs_crop:
                 continue
 
-            # edit_plan 已处理 -> 跳过旧裁剪
+            # edit_plan 已处理且 trim 起点 > 0：说明 Agent 已选择了非零起点段落，无需过渡检测
             if edit_plan_applied[i]:
-                logger.info(f"镜头 {i+1} 已由 edit_plan 裁剪，跳过过渡点检测")
-                continue
-            
+                raw_plan = (shot.get("fields", {}) or {}).get("剪辑指令", "")
+                plan_dict = None
+                if isinstance(raw_plan, str):
+                    try:
+                        plan_dict = json.loads(raw_plan)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif isinstance(raw_plan, dict):
+                    plan_dict = raw_plan
+
+                trim_start = float((plan_dict or {}).get("trim", {}).get("start_sec", 0.0) or 0.0)
+                if trim_start > 0.1:
+                    logger.info(
+                        f"镜头 {i+1} edit_plan 已从 {trim_start:.2f}s 开始裁剪，跳过过渡检测"
+                    )
+                    continue
+
+                logger.info(f"镜头 {i+1} edit_plan trim.start_sec=0，仍需检测过渡点")
+
             shot_number = shot_fields.get("镜头序号", i + 1)
             logger.info(f"镜头 {shot_number} 标记为需要裁剪，检测过渡点: {video_path}")
-            
+
             transition_time = detect_transition_frame(video_path)
-            
-            # 如果检测不到过渡点（返回 0.0），使用 fallback 时间 1.0 秒
+
             if transition_time <= 0:
                 transition_time = 1.0
                 logger.info(f"镜头 {shot_number} 未检测到过渡点，使用 fallback 时间 1.0s")
-            
+
             logger.info(f"镜头 {shot_number} 检测到过渡点 {transition_time:.3f}s，开始裁剪")
             cropped_path = await crop_video_from_time(
                 ffmpeg_bin=settings.FFMPEG_BIN_PATH,
                 input_path=video_path,
                 start_time=transition_time,
-                output_path=str(temp_dir / f"stage5_input_{i:03d}_cropped.mp4")
+                output_path=str(temp_dir / f"stage5_input_{i:03d}_cropped.mp4"),
             )
-            # 替换为裁剪后的视频
             downloaded_files[i] = cropped_path
-            logger.info(f"镜头 {shot_number} 裁剪完成: {cropped_path}")
+            edit_plan_applied[i] = True  # 标记为已处理，避免 rhythm_plan 重复裁剪
+            logger.info(f"镜头 {shot_number} 过渡裁剪完成: {cropped_path}")
         
         # 4.5 逐镜头生成并混入环境音（可选，仅 Kling 无声视频需要）
         if settings.ENABLE_AMBIENT_AUDIO:
@@ -818,8 +833,6 @@ async def add_subtitles_to_video(
         添加字幕后的视频 URL
     """
     from services.ost_service import overlay_ost_on_video, smart_fontsize
-    import tempfile
-
     if not subtitle_data:
         return video_url
 
