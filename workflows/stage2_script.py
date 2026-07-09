@@ -54,6 +54,37 @@ async def run_stage2(
                 "message": "Script generation skipped in simple mode"
             }
 
+        # 幂等检查：job 重试时若分镜记录已创建，跳过重新生成，避免产生重复分镜
+        existing_shots = await airtable.get_project_shots(project_id)
+        if existing_shots:
+            logger.info(
+                f"[{project_id}] Stage 2 已有 {len(existing_shots)} 条分镜记录，"
+                "跳过重新生成（幂等重试）"
+            )
+            # 尝试从项目记录恢复脚本内容（Stage 2 完成时会写入 script_content）
+            script_result = {}
+            try:
+                import json
+                project = await airtable.get_project(project_id)
+                raw_script = (project or {}).get("fields", {}).get("script_content", "")
+                if raw_script:
+                    script_result = json.loads(raw_script)
+            except Exception as e:
+                logger.warning(f"[{project_id}] 恢复 script_content 失败（不阻塞）: {e}")
+            # 重放最终状态更新（本身幂等）
+            await airtable.update_project_status(
+                project_id=project_id,
+                status=ProjectStatus.PROMPT_CONVERTING
+            )
+            return {
+                "success": True,
+                "project_id": project_id,
+                "mode": "full",
+                "skipped": True,
+                "total_shots": len(existing_shots),
+                "script": script_result,
+            }
+
         # 从 Airtable 获取素材
         assets = await airtable.get_project_assets(project_id)
         logger.info(f"Retrieved {len(assets)} assets for project {project_id}")

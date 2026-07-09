@@ -120,6 +120,13 @@ def build_readiness_report(settings: Any, project_root: Path) -> ReadinessReport
     if not _configured(settings.SUNO_API_KEY) and settings.ENABLE_BGM:
         warnings.append("BGM 已启用但未配置 SUNO_API_KEY，将自动跳过")
 
+    job_backend = getattr(settings, "JOB_BACKEND", "durable")
+    checks["job_backend"] = {"passed": True, "backend": job_backend}
+    if job_backend == "memory":
+        warnings.append(
+            "JOB_BACKEND=memory 仅限本地开发：任务重启即丢，生产必须使用 durable"
+        )
+
     return ReadinessReport(
         ready=not blocking,
         checks=checks,

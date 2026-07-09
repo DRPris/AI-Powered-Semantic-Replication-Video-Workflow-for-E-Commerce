@@ -75,6 +75,23 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 打开 http://localhost:8000/docs 查看 Swagger API 文档。
 
+### 4.5 启动网页控制台（可选，推荐）
+
+`frontend/` 目录是一个轻量网页控制台，用于查看项目进度、分镜卡片墙、
+审核关键帧（通过/驳回）并一键触发视频生成：
+
+```bash
+cd frontend
+npm install     # 首次运行
+npm run dev     # 打开 http://localhost:5173
+```
+
+进入页面后点右上角「⚙️ 连接设置」填入 API Key（`.env` 里 `API_KEYS` 的值）。
+本地开发时后端地址留空即可（Vite 会把 `/api` 请求代理到 `localhost:8000`）。
+
+生产部署时执行 `npm run build`，把 `dist/` 交给任意静态服务器托管，
+并在后端 `.env` 的 `CORS_ALLOW_ORIGINS` 里加上控制台的访问地址。
+
 ### 5. 跑一个最小用例（Demo）
 
 准备一支已上传到 OSS（或任意可公开访问 HTTPS）的原视频 + 一张新商品图，最小化触发：

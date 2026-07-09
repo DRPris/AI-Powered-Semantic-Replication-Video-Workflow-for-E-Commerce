@@ -86,7 +86,11 @@ class Settings(BaseSettings):
     # Production persistence and durable jobs
     DATABASE_URL: str = "postgresql+asyncpg://video:video@postgres:5432/video_replication"
     REDIS_URL: str = "redis://redis:6379/0"
-    JOB_BACKEND: str = "memory"  # memory | durable
+    # durable = 生产默认（PostgreSQL + Redis + worker）；memory 仅限本地开发，重启即丢任务
+    JOB_BACKEND: str = "durable"  # durable | memory
+
+    # 网页控制台跨域白名单（逗号分隔）。默认允许本地 Vite 开发服务器
+    CORS_ALLOW_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
     JOB_QUEUE_NAME: str = "video-replication:jobs"
     JOB_LEASE_SECONDS: int = 900
     JOB_MAX_ATTEMPTS: int = 3

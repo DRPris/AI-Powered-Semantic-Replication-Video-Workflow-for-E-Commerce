@@ -93,13 +93,17 @@ class GeminiService:
         # Base URL
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
 
-        # 初始化代理配置 (使用 requests + socks5h 确保 DNS 也走代理，避免 Gemini 地域限制)
-        self.proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY") or "socks5h://127.0.0.1:13659"
-        # 确保使用 socks5h (远程 DNS 解析) 而非 socks5
-        if self.proxy_url.startswith("socks5://"):
-            self.proxy_url = self.proxy_url.replace("socks5://", "socks5h://", 1)
-        logger.info(f"GeminiService using proxy: {self.proxy_url}")
-        
+        # 代理配置：仅在环境变量显式配置时启用（国内部署访问 Gemini 需代理，海外/云端直连）。
+        # 之前硬编码了本地代理默认值，导致无代理环境下 Gemini 调用全部失败。
+        self.proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY") or ""
+        if self.proxy_url:
+            # 确保使用 socks5h (远程 DNS 解析) 而非 socks5，避免 DNS 泄漏出代理
+            if self.proxy_url.startswith("socks5://"):
+                self.proxy_url = self.proxy_url.replace("socks5://", "socks5h://", 1)
+            logger.info(f"GeminiService using proxy: {self.proxy_url}")
+        else:
+            logger.info("GeminiService using direct connection (no proxy configured)")
+
         self._proxies = {"https": self.proxy_url, "http": self.proxy_url} if self.proxy_url else None
 
         # Token 追踪上下文

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import socket
 import uuid
 from contextlib import suppress
@@ -21,6 +22,11 @@ from workflows.stage4_generation import run_stage4
 from workflows.stage5_composition import run_stage5
 from workflows.full_workflow import run_full_workflow
 from workflows.full_workflow import run_post_generation
+
+# 周期性维护间隔：租约回收 + queued 孤儿 reconcile
+MAINTENANCE_INTERVAL_SECONDS = 60
+# queued 状态超过此时长仍未被消费则视为孤儿（Redis 通知丢失），重新入队
+STALE_QUEUED_SECONDS = 120
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +43,11 @@ class WorkflowWorker:
         self._stopping = asyncio.Event()
 
     async def _heartbeat(self, job_id: uuid.UUID) -> None:
+        # 注意：不检查 _stopping —— 优雅关闭期间当前 job 仍在执行，
+        # 心跳必须持续续租，否则租约过期会被其他 worker 重复认领。
+        # 任务结束时由 _execute 的 finally 统一 cancel。
         interval = max(10, settings.JOB_LEASE_SECONDS // 3)
-        while not self._stopping.is_set():
+        while True:
             await asyncio.sleep(interval)
             renewed = await self.repository.renew_lease(
                 job_id,
@@ -169,6 +178,7 @@ class WorkflowWorker:
                 await heartbeat
 
     async def recover_expired(self) -> None:
+        """回收租约过期的 processing job + 滞留的 queued 孤儿 job。"""
         expired = await self.repository.find_expired_jobs(
             queue_name=settings.JOB_QUEUE_NAME
         )
@@ -177,23 +187,63 @@ class WorkflowWorker:
         if expired:
             logger.warning("Requeued %d jobs with expired leases", len(expired))
 
+        # queued 孤儿：Redis 通知丢失（出队后崩溃 / enqueue 失败）时的兜底。
+        # claim() 有行锁+状态检查，重复入队是安全的。
+        stale = await self.repository.find_stale_queued_jobs(
+            queue_name=settings.JOB_QUEUE_NAME,
+            stale_seconds=STALE_QUEUED_SECONDS,
+        )
+        for job_id in stale:
+            await self.queue.enqueue(job_id)
+        if stale:
+            logger.warning("Re-enqueued %d stale queued jobs", len(stale))
+
+    async def _maintenance_loop(self) -> None:
+        """周期执行租约回收，防止 worker 崩溃后 job 卡死到进程重启。"""
+        while not self._stopping.is_set():
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._stopping.wait(),
+                    timeout=MAINTENANCE_INTERVAL_SECONDS,
+                )
+            if self._stopping.is_set():
+                return
+            try:
+                await self.recover_expired()
+            except Exception:
+                logger.exception("Periodic lease recovery failed")
+
+    def request_stop(self) -> None:
+        logger.info("Shutdown signal received, finishing current job...")
+        self._stopping.set()
+
     async def run(self) -> None:
         logger.info("Worker started: %s", self.worker_id)
         await self.recover_expired()
+        maintenance = asyncio.create_task(self._maintenance_loop())
         try:
             while not self._stopping.is_set():
                 job_id = await self.queue.dequeue(
                     timeout_seconds=settings.WORKER_POLL_TIMEOUT_SECONDS
                 )
                 if job_id is not None:
+                    # dequeue 后立即执行；claim 失败（已被其他 worker 认领/终态）会静默返回
                     await self._execute(job_id)
         finally:
+            maintenance.cancel()
+            with suppress(asyncio.CancelledError):
+                await maintenance
             await self.queue.close()
             await close_database()
+            logger.info("Worker stopped: %s", self.worker_id)
 
 
 async def main() -> None:
-    await WorkflowWorker().run()
+    worker = WorkflowWorker()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, worker.request_stop)
+    await worker.run()
 
 
 if __name__ == "__main__":

@@ -12,6 +12,18 @@ from persistence.models import JobRecord, ProjectRecord
 from services.durable_queue import DurableJobQueue
 
 
+class ProjectJobConflict(RuntimeError):
+    """同一项目已有活跃 job，拒绝重复创建。"""
+
+    def __init__(self, project_id: str, existing_job: JobRecord) -> None:
+        self.project_id = project_id
+        self.existing_job = existing_job
+        super().__init__(
+            f"Project {project_id} already has an active job "
+            f"{existing_job.id} (status={existing_job.status})"
+        )
+
+
 class DurableJobService:
     def __init__(
         self,
@@ -65,6 +77,10 @@ class DurableJobService:
         payload: dict[str, Any],
     ) -> tuple[ProjectRecord, JobRecord]:
         project_uuid = uuid.UUID(str(project_id))
+        # 项目级互斥：避免同一项目并发启动两条完整工作流
+        active = await self.repository.find_active_job_for_project(project_uuid)
+        if active is not None:
+            raise ProjectJobConflict(str(project_id), active)
         project = await self.repository.attach_external_id(
             project_uuid,
             external_id=external_project_id,
@@ -92,6 +108,11 @@ class DurableJobService:
         project = await self.repository.get_project(project_uuid)
         if project is None:
             raise ValueError(f"Project not found: {project_id}")
+        # 项目级互斥：同一项目已有排队/执行中的 job 时拒绝重复触发，
+        # 防止重复点击或并发请求导致同一项目跑两份 Stage 4（重复计费+数据冲突）
+        active = await self.repository.find_active_job_for_project(project_uuid)
+        if active is not None:
+            raise ProjectJobConflict(str(project_id), active)
         job = await self.repository.create_job(
             project_id=project.id,
             job_type=job_type,

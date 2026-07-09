@@ -563,11 +563,13 @@ async def run_stage5(
     except OSError as e:
         logger.warning(f"清理临时文件失败: {e}")
 
-    # 8. 更新项目状态为已完成
+    # 8. 更新项目状态为已完成，并把成片 URL 写回项目记录（控制台成品页读取）
     await airtable_service.update_project(
         project_id=project_id,
         data={
             "状态": "COMPLETED",
+            "成片链接": final_video_url,
+            "成片时长": duration,
         },
     )
 

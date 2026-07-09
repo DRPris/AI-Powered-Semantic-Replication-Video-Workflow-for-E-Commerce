@@ -471,6 +471,34 @@ async def run_stage3_5(project_id: str) -> dict:
             shot_fields = shot.get("fields", {})
             shot_number = shot_fields.get("镜头序号", idx + 1)
 
+            # 幂等检查：job 重试时跳过已生成关键帧的镜头，避免重复生成和重复计费。
+            # Airtable 后端该字段是附件数组，PostgreSQL 后端是 URL 字符串，两种都兼容。
+            existing_keyframe = shot_fields.get("关键帧图片")
+            if isinstance(existing_keyframe, list):
+                existing_keyframe = (
+                    (existing_keyframe[0] or {}).get("url", "")
+                    if existing_keyframe else ""
+                )
+            if existing_keyframe:
+                logger.info(
+                    f"[Keyframe] 镜头 {shot_number} 已有关键帧，跳过生成（幂等重试）"
+                )
+                successful_count += 1
+                # 维持续帧上下文，让后续镜头仍能以本帧为参考
+                prev_keyframe_url = existing_keyframe
+                parsed_prompt = _parse_generation_prompt(shot_fields.get("生成提示词", ""))
+                prev_shot_desc = _sanitize_scene_description(
+                    parsed_prompt.get("first_frame", "")
+                    or shot_fields.get("新镜头描述", "")
+                )
+                results.append({
+                    "shot_id": shot_id,
+                    "shot_number": shot_number,
+                    "status": "skipped_existing",
+                    "keyframe_url": existing_keyframe,
+                })
+                continue
+
             logger.info(f"[Keyframe] 开始生成镜头 {shot_number} 的关键帧 ({idx + 1}/{len(shots)})")
 
             try:

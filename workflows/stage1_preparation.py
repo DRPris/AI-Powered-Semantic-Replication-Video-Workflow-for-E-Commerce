@@ -297,6 +297,42 @@ def _truncate_content(content: str, max_length: int = 90000) -> str:
     return truncated + "\n\n...(content truncated, original length: {})".format(len(content))
 
 
+def _load_completed_stage1_results(assets: list) -> dict | None:
+    """从已存在的素材记录恢复 Stage 1 分析结果（job 重试幂等用）。
+
+    仅当 video + product 素材同时存在且内容可解析时返回结果字典；
+    任一缺失或解析失败则返回 None，让 Stage 1 正常重新执行。
+    """
+    parsed: dict = {}
+    for asset in assets:
+        fields = asset.get("fields", {})
+        asset_type = fields.get("素材类型", "")
+        if asset_type not in (AssetType.VIDEO, AssetType.PRODUCT, "rhythm"):
+            continue
+        content = fields.get("内容", "")
+        try:
+            data = json.loads(content) if content else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and data.get("analysis_result"):
+            parsed[str(asset_type)] = data
+
+    video_data = parsed.get(AssetType.VIDEO)
+    product_data = parsed.get(AssetType.PRODUCT)
+    if not video_data or not product_data:
+        return None
+
+    rhythm_data = parsed.get("rhythm") or {}
+    return {
+        "video_analysis": video_data.get("analysis_result") or {},
+        "product_analysis": product_data.get("analysis_result") or {},
+        "rhythm_analysis": rhythm_data.get("analysis_result"),
+        "product_listing_info": product_data.get("product_listing_info"),
+        "product_brief": product_data.get("product_brief"),
+        "three_views": product_data.get("three_views"),
+    }
+
+
 async def run_stage1(
     project_id: str,
     video_url: str,
@@ -328,6 +364,31 @@ async def run_stage1(
     )
 
     try:
+        # 幂等检查：job 重试时若 Stage 1 已完成（分析素材已保存），
+        # 直接恢复结果并跳过昂贵的重新分析，避免重复调用 Gemini 和重复写素材记录
+        existing_assets = await airtable.get_project_assets(project_id)
+        restored = _load_completed_stage1_results(existing_assets)
+        if restored is not None:
+            logger.info(
+                f"[{project_id}] Stage 1 素材已存在，跳过重新分析（幂等重试）"
+            )
+            # 重放最终状态更新（本身幂等），保证项目状态推进到位
+            target_status = (
+                ProjectStatus.GENERATING
+                if mode == "simple"
+                else ProjectStatus.SCRIPT_GENERATING
+            )
+            await airtable.update_project_status(
+                project_id=project_id, status=target_status
+            )
+            return {
+                "success": True,
+                "project_id": project_id,
+                "mode": "simple" if mode == "simple" else "full",
+                "skipped": True,
+                **restored,
+            }
+
         # 更新项目状态为分析中
         await airtable.update_project_status(
             project_id=project_id,

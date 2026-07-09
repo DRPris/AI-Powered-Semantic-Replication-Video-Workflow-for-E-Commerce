@@ -105,6 +105,15 @@ class StartWorkflowRequest(BaseModel):
         return self
 
 
+class ShotReviewRequest(BaseModel):
+    """分镜人工审核写回请求"""
+    review_type: str = Field(
+        default="prompt", description="审核类型：prompt（提示词/关键帧审核）或 video（生成视频审核）"
+    )
+    status: str = Field(..., description="审核状态：已通过 / 已驳回 / 需修改 / 需重新生成 / 待审核")
+    comment: str = Field(default="", description="审核意见（驳回时建议填写原因）")
+
+
 class ConfirmBriefRequest(BaseModel):
     """确认 Product Brief 请求：用户对待确认问题的答复"""
     user_answers: Optional[dict] = Field(default=None, description="用户答复字典，key=字段名，value=答复值。为空时从 Airtable “用户答复”字段读取")
@@ -119,10 +128,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# memory 后端仅限本地开发：任务状态存进程内存，重启即丢，多副本不共享
+if settings.JOB_BACKEND == "memory":
+    logger.warning(
+        "JOB_BACKEND=memory：任务状态仅存于进程内存，重启即丢失。"
+        "生产环境必须使用 JOB_BACKEND=durable（PostgreSQL + Redis + worker）。"
+    )
+
 
 @app.middleware("http")
 async def api_auth_middleware(request: Request, call_next):
     """Protect routes that can expose project data or trigger model spend."""
+    # OPTIONS 是浏览器 CORS 预检请求，不带业务数据也不带 API Key，必须放行
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if request.url.path in {"/health", "/ready"}:
         return await call_next(request)
 
@@ -133,6 +152,23 @@ async def api_auth_middleware(request: Request, call_next):
             content={"detail": decision.message},
         )
     return await call_next(request)
+
+
+# CORS：允许网页控制台（浏览器）跨域调用 API。
+# 注意必须在 auth 中间件之后注册（Starlette 后注册的在最外层），
+# 这样 401 等错误响应也会带上 CORS 头，浏览器端才能读到错误详情。
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in settings.CORS_ALLOW_ORIGINS.split(",")
+        if origin.strip()
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 挂载静态文件目录（用于帧图片访问）
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -731,7 +767,7 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
         raise HTTPException(status_code=402, detail=str(e))
 
     if settings.JOB_BACKEND == "durable":
-        from services.durable_job_service import DurableJobService
+        from services.durable_job_service import DurableJobService, ProjectJobConflict
 
         durable_jobs = DurableJobService()
         try:
@@ -745,6 +781,16 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+        except ProjectJobConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "该项目已有正在执行的任务，请等待完成或先取消",
+                    "project_id": request.project_id,
+                    "active_job_id": str(exc.existing_job.id),
+                    "active_job_status": exc.existing_job.status,
+                },
+            )
         finally:
             await durable_jobs.close()
         return {
@@ -753,6 +799,8 @@ async def generate_shots(request: GenerateShotsRequest, background_tasks: Backgr
             "message": "视频生成 + AI 剪辑 + 合成任务已进入持久化队列",
             "project_id": request.project_id,
         }
+
+    _assert_no_active_memory_job(request.project_id)
 
     import uuid
     job_id = str(uuid.uuid4())
@@ -875,6 +923,23 @@ async def get_generation_status(job_id: str) -> JobStatusResponse:
 # 内存中的任务状态存储（生产环境应使用 Redis）
 _composition_jobs: dict[str, dict[str, Any]] = {}
 _generation_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _assert_no_active_memory_job(project_id: str) -> None:
+    """memory 模式下的项目级互斥：同一项目已有进行中的生成任务时抛 409。"""
+    for job in _generation_jobs.values():
+        if (
+            job.get("project_id") == project_id
+            and job.get("status") == JobStatus.PROCESSING
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "该项目已有正在执行的生成任务，请等待完成",
+                    "project_id": project_id,
+                    "active_job_id": job.get("job_id"),
+                },
+            )
 
 
 @app.post("/api/v1/edit-clips", response_model=ClipEditorResponse)
@@ -1150,6 +1215,99 @@ async def get_review_status(
 
 
 # ============================================================================
+# 项目数据查询 API（只读，供测试/排查中间产物使用）
+# ============================================================================
+
+@app.get("/api/v1/projects")
+async def list_projects(
+    status: Optional[str] = Query(default=None, description="按项目状态过滤（可选）"),
+    limit: int = Query(default=100, ge=1, le=500, description="返回数量上限"),
+) -> dict[str, Any]:
+    """查询项目列表（按创建时间倒序），供控制台首页使用"""
+    projects = await airtable_service.list_projects(status=status, limit=limit)
+    return {
+        "total": len(projects),
+        "projects": projects,
+    }
+
+
+@app.get("/api/v1/projects/{project_id}")
+async def get_project_detail(project_id: str) -> dict[str, Any]:
+    """查询项目详情：状态、分析结果、脚本内容等全部字段"""
+    project = await airtable_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {project_id} 不存在")
+    return project
+
+
+@app.get("/api/v1/projects/{project_id}/shots")
+async def list_project_shots(project_id: str) -> dict[str, Any]:
+    """查询项目的全部分镜记录：描述、提示词、关键帧、生成视频、剪辑指令、审核状态"""
+    project = await airtable_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {project_id} 不存在")
+    shots = await airtable_service.get_project_shots(project_id)
+    return {
+        "project_id": project_id,
+        "total": len(shots),
+        "shots": shots,
+    }
+
+
+@app.get("/api/v1/projects/{project_id}/assets")
+async def list_project_assets(project_id: str) -> dict[str, Any]:
+    """查询项目的全部素材记录：视频/商品分析结果、节奏分析、三视图等"""
+    project = await airtable_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {project_id} 不存在")
+    assets = await airtable_service.get_project_assets(project_id)
+    return {
+        "project_id": project_id,
+        "total": len(assets),
+        "assets": assets,
+    }
+
+
+_ALLOWED_REVIEW_STATUSES = {"已通过", "已驳回", "需修改", "需重新生成", "待审核"}
+
+
+@app.post("/api/v1/shots/{shot_id}/review")
+async def review_shot(shot_id: str, request: ShotReviewRequest) -> dict[str, Any]:
+    """人工审核写回：更新单个分镜的审核状态和意见（控制台审核页使用）
+
+    review_type=prompt 更新"提示词审核状态"（关键帧审核复用该字段，
+    approve-keyframes 接口放行的判定依据就是它）；
+    review_type=video 更新"视频审核状态"。
+    """
+    if request.status not in _ALLOWED_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status 必须是 {sorted(_ALLOWED_REVIEW_STATUSES)} 之一",
+        )
+    if request.review_type not in {"prompt", "video"}:
+        raise HTTPException(status_code=422, detail="review_type 必须是 prompt 或 video")
+
+    try:
+        if request.review_type == "prompt":
+            shot = await airtable_service.update_shot_prompt_status(
+                shot_id, request.status, review_comment=request.comment
+            )
+        else:
+            shot = await airtable_service.update_shot_video_status(
+                shot_id, request.status, review_comment=request.comment
+            )
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=f"分镜 {shot_id} 不存在: {exc}")
+
+    return {
+        "shot_id": shot_id,
+        "review_type": request.review_type,
+        "status": request.status,
+        "shot": shot,
+    }
+
+
+# ============================================================================
 # 关键帧相关 API
 # ============================================================================
 
@@ -1306,7 +1464,7 @@ async def approve_keyframes(
         logger.info(f"[{project_id}] 项目状态 → GENERATING")
 
         if settings.JOB_BACKEND == "durable":
-            from services.durable_job_service import DurableJobService
+            from services.durable_job_service import DurableJobService, ProjectJobConflict
 
             durable_jobs = DurableJobService()
             try:
@@ -1318,6 +1476,16 @@ async def approve_keyframes(
                         "platform": "seedance",
                     },
                 )
+            except ProjectJobConflict as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "该项目已有正在执行的任务，请等待完成或先取消",
+                        "project_id": project_id,
+                        "active_job_id": str(exc.existing_job.id),
+                        "active_job_status": exc.existing_job.status,
+                    },
+                )
             finally:
                 await durable_jobs.close()
             return {
@@ -1327,7 +1495,8 @@ async def approve_keyframes(
                 "project_id": project_id,
             }
 
-        # 创建后台任务触发 Stage 4
+        # 创建后台任务触发 Stage 4（memory 模式：先做项目级互斥检查）
+        _assert_no_active_memory_job(project_id)
         job_id = str(uuid.uuid4())
 
         _generation_jobs[job_id] = {

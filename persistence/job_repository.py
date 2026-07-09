@@ -30,6 +30,15 @@ TERMINAL_STATUSES = {
     DurableJobStatus.CANCELLED,
 }
 
+# 视为"正在执行中"的状态——用于项目级互斥。
+# 注意不含 waiting_review / waiting_keyframe_review：等待人审的 job 已暂停，
+# 审核通过后的续跑正是通过创建新 job 实现的，不能被互斥挡住。
+ACTIVE_STATUSES = {
+    DurableJobStatus.PENDING,
+    DurableJobStatus.QUEUED,
+    DurableJobStatus.PROCESSING,
+}
+
 ALLOWED_TRANSITIONS = {
     DurableJobStatus.PENDING: {
         DurableJobStatus.QUEUED,
@@ -145,6 +154,24 @@ class JobRepository:
             await session.commit()
             await session.refresh(project)
             return project
+
+    async def find_active_job_for_project(
+        self, project_id: uuid.UUID
+    ) -> JobRecord | None:
+        """返回项目当前活跃（pending/queued/processing）的最新 job，无则 None。"""
+        async with self._session_factory() as session:
+            query = (
+                select(JobRecord)
+                .where(
+                    JobRecord.project_id == project_id,
+                    JobRecord.status.in_(
+                        [status.value for status in ACTIVE_STATUSES]
+                    ),
+                )
+                .order_by(JobRecord.created_at.desc())
+                .limit(1)
+            )
+            return await session.scalar(query)
 
     async def latest_job_for_project(
         self, project_id: uuid.UUID
@@ -323,6 +350,44 @@ class JobRepository:
                 record.status = DurableJobStatus.QUEUED.value
                 record.worker_id = None
                 record.lease_expires_at = None
+                record.updated_at = now
+                ids.append(record.id)
+            await session.commit()
+            return ids
+
+    async def find_stale_queued_jobs(
+        self,
+        *,
+        queue_name: str,
+        stale_seconds: int,
+        limit: int = 100,
+    ) -> list[uuid.UUID]:
+        """找出滞留在 queued 状态的孤儿 job（Redis 通知丢失的兜底）。
+
+        产生场景：
+        1. worker BRPOP 出队后、DB claim 前崩溃 —— Redis 中已无记录
+        2. mark_queued 成功但 enqueue Redis 失败
+
+        重新入队是安全的：claim() 有 with_for_update 行锁 + 状态检查，
+        重复通知只会导致第二次 claim 返回 None。
+        这里会刷新 updated_at，避免下个 reconcile 周期重复捞出。
+        """
+        async with self._session_factory() as session:
+            now = _utcnow()
+            threshold = now - timedelta(seconds=stale_seconds)
+            query = (
+                select(JobRecord)
+                .where(
+                    JobRecord.queue_name == queue_name,
+                    JobRecord.status == DurableJobStatus.QUEUED.value,
+                    JobRecord.updated_at <= threshold,
+                )
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            records = list((await session.scalars(query)).all())
+            ids: list[uuid.UUID] = []
+            for record in records:
                 record.updated_at = now
                 ids.append(record.id)
             await session.commit()
