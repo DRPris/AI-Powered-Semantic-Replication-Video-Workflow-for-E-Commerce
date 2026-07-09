@@ -46,6 +46,17 @@ For container/bag/pouch/box products, check the causal ordering across all shots
 - When flagging causal chain issues, set type to "causal_chain_review" and severity to "warning".
 - The fix_instruction should prompt the user to confirm, e.g.: "Shot X contains squeezing/rubbing action on the mesh bag but no prior shot shows soap being inserted. Please confirm if this matches the intended product usage flow, or if a loading step should be added."
 
+### 6. USAGE INSTRUCTION ORDER (warning)
+Only when the Product Listing Info contains a `usage_instructions` list (the official ordered usage steps):
+- Check that product operation actions across shots follow the ORDER and PRECONDITIONS of `usage_instructions`.
+  - Example: if usage_instructions say "wet the pouch before rubbing to lather", a lathering shot whose
+    description shows a dry pouch (and no earlier shot / wording establishes wetness) violates the precondition.
+- Preconditions may be satisfied by wording alone (e.g. "the wet mesh pouch") — do NOT require a dedicated extra shot.
+- Do NOT flag missing post-use / care steps (e.g. "hang to dry") — they are optional in a short video.
+- When flagging, set type to "usage_order_violation" and severity to "warning".
+- The fix_instruction should suggest the minimal wording change (e.g. "describe the pouch as wet in Shot X"),
+  never suggest adding new shots.
+
 ## INPUT DATA
 
 ### Generated Script:
@@ -64,7 +75,7 @@ Please output your response in valid JSON format:
   "confidence": 0.92,
   "issues": [
     {{
-      "type": "duplicate_action|hallucinated_feature|missing_selling_point|physical_impossibility|causal_chain_review",
+      "type": "duplicate_action|hallucinated_feature|missing_selling_point|physical_impossibility|causal_chain_review|usage_order_violation",
       "severity": "critical|warning",
       "shot_numbers": [2, 3],
       "description": "Clear description of what's wrong",

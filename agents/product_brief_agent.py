@@ -273,6 +273,8 @@ class ProductBriefAgent:
                 physical_attrs=brief_data.get("physical_attrs") or layer1 or {},
                 operation_mechanics=brief_data.get("operation_mechanics") or layer2 or {},
                 use_effect=brief_data.get("use_effect") or layer3 or {},
+                usage_instructions=list(brief_data.get("usage_instructions") or
+                                         (product_listing_info or {}).get("usage_instructions") or [])[:12],
                 key_selling_points=list(brief_data.get("key_selling_points") or
                                          (product_listing_info or {}).get("key_selling_points") or [])[:8],
                 target_audience=str(brief_data.get("target_audience") or ""),
@@ -354,6 +356,7 @@ class ProductBriefAgent:
             physical_attrs=layer1 or {},
             operation_mechanics=layer2 or {},
             use_effect=layer3 or {},
+            usage_instructions=list(listing.get("usage_instructions") or [])[:12],
             key_selling_points=merged_selling_points[:8],
             target_audience=(video_analysis.get("target_audience_visual_cues") or [""])[0] if video_analysis else "",
             tone=((video_analysis.get("tone_hints") or {}).get("style") or "") if video_analysis else "",

@@ -423,6 +423,10 @@ class ProductBrief(BaseModel):
     physical_attrs: dict = Field(default_factory=dict, description="沿用 layer_1_physical_attributes")
     operation_mechanics: dict = Field(default_factory=dict, description="沿用 layer_2_operation_mechanics")
     use_effect: dict = Field(default_factory=dict, description="沿用 layer_3_use_effect")
+    usage_instructions: List[str] = Field(
+        default_factory=list,
+        description="官方使用步骤（有序），含使用前准备与使用后处理，如 '1. 打湿网袋 2. 装入香皂 ...'",
+    )
 
     # Agent 补全信息（Phase B 产出）
     key_selling_points: List[str] = Field(default_factory=list, description="核心卖点（3-5 条）")

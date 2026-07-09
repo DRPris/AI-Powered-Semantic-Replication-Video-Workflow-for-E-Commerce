@@ -12,6 +12,8 @@ Focus on:
 2. Functional features that require specific actions to demonstrate
 3. Key selling points that should be visually highlighted in a video
 4. Usage scenarios that show the product in action
+5. The official step-by-step usage instructions (how-to-use section), including any
+   preparation steps BEFORE use and care steps AFTER use
 
 ### CRITICAL RULES:
 
@@ -26,6 +28,19 @@ When describing `action_required`, you MUST specify the full operational sequenc
 Example (correct): "Insert a bar of soap into the pouch, then squeeze and knead the pouch with wet hands; the mesh generates rich lather from the soap inside."
 Example (wrong): "Rub it vigorously between the palms."
 Also distinguish between: (a) actions performed ON the product itself, and (b) actions the product enables on the contained/loaded item. The description must include the state of any item loaded inside the product.
+
+**Rule C – Usage Instructions (usage_instructions):**
+Extract the product's OFFICIAL end-to-end usage flow as an ORDERED list of steps.
+This is different from `functional_features` (which is per-feature): `usage_instructions`
+describes the complete journey of using the product ONCE, in chronological order.
+  - Include preparation steps (e.g. "wet the pouch with water before use")
+  - Include the main operation steps in the exact order the page describes
+  - Include post-use / care steps if mentioned (e.g. "hang to dry after use")
+  - Each step must be a single atomic action using the canonical product names from Rule A
+If the page has an explicit "How to use" / "使用方法" / instructions section, follow it faithfully.
+If not, reconstruct the most likely ordered flow ONLY from actions explicitly mentioned on the page,
+and set `usage_instructions_source` to "inferred" instead of "explicit".
+Do NOT invent steps that the page does not support.
 
 ### Page Content:
 {page_content}
@@ -50,6 +65,13 @@ Please output your response in valid JSON format with the following structure:
     }}
   ],
   "usage_scenarios": ["scenario 1", "scenario 2"],
+  "usage_instructions": [
+    "step 1: preparation action (e.g. wet the mesh pouch with water)",
+    "step 2: main operation action",
+    "step 3: ...",
+    "final step: post-use / care action if mentioned (e.g. hang the pouch to dry)"
+  ],
+  "usage_instructions_source": "explicit|inferred",
   "differentiators": "what makes this product unique compared to similar products",
   "video_production_notes": "any special considerations for filming this product (e.g., needs to show folding sequence, water flow, light effects)"
 }}

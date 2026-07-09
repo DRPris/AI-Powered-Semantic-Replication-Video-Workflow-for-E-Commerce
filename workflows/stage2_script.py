@@ -211,6 +211,10 @@ async def run_stage2(
                 "competitor_differentiators",
                 "constraints",
                 "brand",
+                # 使用方式相关字段：Agent 综合了链接/商品视频/图片三方证据，
+                # 不注入的话脚本生成只能靠图片猜的操作方式，容易穿帮
+                "usage_instructions",
+                "operation_mechanics",
             ):
                 v = product_brief.get(k)
                 if v:
@@ -221,7 +225,8 @@ async def run_stage2(
                 f"[{project_id}] Product Brief injected into listing_info: "
                 f"target_audience={bool(product_brief.get('target_audience'))}, "
                 f"tone={bool(product_brief.get('tone'))}, "
-                f"selling_points={len(product_brief.get('key_selling_points') or [])}"
+                f"selling_points={len(product_brief.get('key_selling_points') or [])}, "
+                f"usage_instructions={len(product_brief.get('usage_instructions') or [])}"
             )
 
         # 动作兼容性检测：在脚本生成前检测原视频动作与新产品的兼容性

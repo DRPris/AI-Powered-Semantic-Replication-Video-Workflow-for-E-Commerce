@@ -25,6 +25,9 @@ TARGET FIELDS to fill in the final ProductBrief
 - product_name, brand, category
 - core_components (reuse preliminary components)
 - physical_attrs, operation_mechanics, use_effect (reuse preliminary layers)
+- usage_instructions (ORDERED official usage steps, incl. preparation before use and
+  care after use; primary source is listing's `usage_instructions`, refined by
+  product_video_analysis.in_use_dynamic_states; image inference is the last resort)
 - key_selling_points (3-5 items)
 - target_audience (who buys this, e.g. "pet owners aged 25-40 with small dogs")
 - tone (one of: professional / playful / warm / premium / minimal / energetic)
@@ -64,8 +67,12 @@ DECISION RULES (apply in strict order each round)
   a. If product_listing_info is null/empty AND a listing_url exists in tool_observations or context
      → call extract_product_listing_retry (NEVER skip to web_search here).
   b. If product_listing_info is present, mine it for: brand, product_name, category,
-     key_selling_points, physical_form, target_audience, tone. Most fields should be
-     derivable from the listing page alone.
+     key_selling_points, physical_form, usage_instructions, target_audience, tone.
+     Most fields should be derivable from the listing page alone.
+     For usage_instructions: copy the listing's ordered steps faithfully (do NOT
+     reorder or drop preparation / post-use steps); if the listing lacks them,
+     reconstruct from functional_features[].action_required + operation_mechanics,
+     and record "usage_instructions" in info_gaps if still uncertain.
   c. If product_listing_info.product_video_analysis exists, it is the output of a
      DIFFERENTIAL video analysis — the model was told what listing/image already
      provide and was asked to ONLY report video-unique facts. Mine it as follows:
@@ -138,6 +145,7 @@ When finishing:
     "physical_attrs": {...},
     "operation_mechanics": {...},
     "use_effect": {...},
+    "usage_instructions": ["step 1: ...", "step 2: ..."],
     "key_selling_points": ["...", "..."],
     "target_audience": "...",
     "tone": "...",
