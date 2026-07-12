@@ -7,8 +7,11 @@
 流程：
 1. 检查 ENABLE_KEYFRAME_STAGE 配置开关
 2. 从 Airtable 获取所有分镜（按镜头序号排序）
-3. 获取三视图 URL + 产品分析摘要
-4. 逐镜头生成关键帧图片（顺序执行，后续帧依赖前一帧）
+3. 获取产品参考图（真实照片 > 三视图 > 主图）+ 产品分析摘要
+4. 逐镜头生成关键帧图片（顺序执行）：
+   - 锚定模式（首帧/场景切换/周期性重锚定）：仅产品参考图，产品最保真
+   - 续帧模式：产品参考图在前 + 前帧殿后，兼顾场景连贯
+   - 级联审查（L1 Qwen-VL → L2 Gemini），驳回自动重生成（MAX_KEYFRAME_ATTEMPTS）
 5. 每张图经 9:16 标准化 → OSS → Airtable
 6. 更新项目状态为 KEYFRAME_REVIEW
 """
@@ -414,14 +417,27 @@ async def run_stage3_5(project_id: str) -> dict:
 
         logger.info(f"Project {project_id} 共 {len(shots)} 个分镜")
 
-        # ---- 3. 获取三视图 URL ----
+        # ---- 3. 获取产品参考图（真图优先） ----
+        # 优先级：用户上传的多角度真实照片(product_image) > 三视图 > 商品分析素材附件。
+        # 真实照片没有 AI 幻觉，是最可靠的产品形态锚点；
+        # 三视图是 Gemini 从单图脑补生成的，侧面/顶面可能失真。
         assets = await airtable.get_project_assets(project_id)
+        real_image_urls: list[str] = []      # 用户上传的产品真实照片
         three_view_url: Optional[str] = None
+        product_fallback_url: Optional[str] = None  # 商品分析素材的附件（通常=主图）
         product_analysis_content: str = ""
 
         for asset in assets:
             af = asset.get("fields", {})
             asset_type = af.get("素材类型", "").lower()
+
+            # 产品真实照片（可多张）
+            if asset_type == "product_image":
+                attachments = af.get("附件", [])
+                if attachments:
+                    url = attachments[0].get("url")
+                    if url and url not in real_image_urls:
+                        real_image_urls.append(url)
 
             # 三视图
             if not three_view_url and any(
@@ -435,15 +451,26 @@ async def run_stage3_5(project_id: str) -> dict:
             # 产品分析
             if not product_analysis_content and asset_type == "product":
                 product_analysis_content = af.get("内容", "")
-                # 如果三视图还没找到，检查产品素材附件作为 fallback
-                if not three_view_url:
-                    attachments = af.get("附件", [])
-                    if attachments:
-                        three_view_url = attachments[0].get("url")
-                        logger.info(f"Using product image as three-view fallback: {three_view_url[:60]}...")
+                attachments = af.get("附件", [])
+                if attachments:
+                    product_fallback_url = attachments[0].get("url")
 
-        if not three_view_url:
-            logger.warning(f"Project {project_id} 未找到三视图或产品图，关键帧将使用纯文生图模式")
+        # 组装最终产品参考图列表（生成与审核共用同一套锚点）
+        max_refs = max(1, int(getattr(settings, "MAX_PRODUCT_REF_IMAGES", 3)))
+        if real_image_urls:
+            product_ref_urls = real_image_urls[:max_refs]
+            logger.info(
+                f"Project {project_id} 使用 {len(product_ref_urls)} 张商品真实照片作为产品锚点"
+            )
+        elif three_view_url:
+            product_ref_urls = [three_view_url]
+            logger.info(f"Project {project_id} 无商品真实照片，使用三视图作为产品锚点")
+        elif product_fallback_url:
+            product_ref_urls = [product_fallback_url]
+            logger.info(f"Project {project_id} 使用商品分析素材附件作为产品锚点（兜底）")
+        else:
+            product_ref_urls = []
+            logger.warning(f"Project {project_id} 未找到任何产品参考图，关键帧将使用纯文生图模式")
 
         product_summary = _extract_product_summary(product_analysis_content)
         composition_details = _extract_composition_details(product_analysis_content)
@@ -465,6 +492,15 @@ async def run_stage3_5(project_id: str) -> dict:
         failed_count = 0
         prev_keyframe_url: Optional[str] = None  # 上一帧的关键帧 OSS URL
         prev_shot_desc: str = ""  # 上一镜头的场景描述，用于场景切换检测
+        # 抗漂移状态：
+        # frames_since_anchor —— 连续使用"前帧续帧模式"的次数，达到阈值后强制重锚定，
+        #   打断"前一帧的轻微形变被下一帧继承并放大"的累积链（雪球效应）
+        # scene_anchor_url —— 当前场景的锚定帧（锚定模式生成且过审的帧），
+        #   审核时作为额外参考图，让模型直接对比"待审帧 vs 场景起点"的累积漂移
+        frames_since_anchor: int = 0
+        scene_anchor_url: Optional[str] = None
+        reanchor_interval = int(getattr(settings, "KEYFRAME_REANCHOR_INTERVAL", 0))
+        max_attempts = max(1, int(getattr(settings, "MAX_KEYFRAME_ATTEMPTS", 1)))
 
         for idx, shot in enumerate(shots):
             shot_id = shot.get("id")
@@ -486,6 +522,8 @@ async def run_stage3_5(project_id: str) -> dict:
                 successful_count += 1
                 # 维持续帧上下文，让后续镜头仍能以本帧为参考
                 prev_keyframe_url = existing_keyframe
+                if scene_anchor_url is None:
+                    scene_anchor_url = existing_keyframe
                 parsed_prompt = _parse_generation_prompt(shot_fields.get("生成提示词", ""))
                 prev_shot_desc = _sanitize_scene_description(
                     parsed_prompt.get("first_frame", "")
@@ -523,128 +561,151 @@ async def run_stage3_5(project_id: str) -> dict:
                 hard_constraints = _sanitize_scene_description(hard_constraints)
                 camera_instruction = _sanitize_scene_description(camera_instruction)
 
-                # 构建 prompt + input_urls
-                if idx == 0:
-                    # Shot 1：首帧，仅使用三视图作为参考
+                # ---- 决定生成模式：锚定模式 vs 续帧模式 ----
+                # 锚定模式：仅产品参考图（Shot 1 / 场景切换 / 周期性重锚定），产品最保真
+                # 续帧模式：产品参考图在前 + 前帧殿后，兼顾产品保真与场景连贯
+                anchor_mode = False
+                anchor_reason = ""
+                scene_hint = ""
+                if idx == 0 or not prev_keyframe_url:
+                    anchor_mode = True
+                    anchor_reason = "首帧" if idx == 0 else "无可用前帧"
+                else:
+                    scene_changed = _is_scene_transition(
+                        prev_shot_desc=prev_shot_desc,
+                        curr_shot_desc=first_frame_desc,
+                        product_keywords=product_keywords,
+                    )
+                    if scene_changed:
+                        anchor_mode = True
+                        anchor_reason = "场景切换"
+                    elif reanchor_interval > 0 and frames_since_anchor >= reanchor_interval:
+                        # 周期性重锚定：连续续帧达到阈值，强制回到仅产品参考图模式。
+                        # 前帧图片会把已发生的轻微形变传给下一帧，文字描述则不会，
+                        # 所以用上一镜头的文字描述（scene_hint）替代前帧图片来保持场景连贯。
+                        anchor_mode = True
+                        anchor_reason = f"周期性重锚定(连续续帧{frames_since_anchor}次)"
+                        scene_hint = prev_shot_desc
+
+                if anchor_mode:
                     prompt_text = build_first_shot_prompt(
                         first_frame_description=first_frame_desc,
                         camera_instruction=camera_instruction,
                         hard_constraints=hard_constraints,
                         product_analysis_summary=product_summary,
                         product_composition_details=composition_details,
+                        product_ref_count=len(product_ref_urls),
+                        previous_scene_hint=scene_hint,
                     )
-                    input_urls = [three_view_url] if three_view_url else None
-                    logger.info(f"[Keyframe] 镜头 {shot_number}: 首帧模式, input_urls={'三视图' if three_view_url else 'None'}")
-                else:
-                    # Shot N：后续帧——先检测场景切换
-                    scene_changed = _is_scene_transition(
-                        prev_shot_desc=prev_shot_desc,
-                        curr_shot_desc=first_frame_desc,
-                        product_keywords=product_keywords,
-                    )
-
-                    if scene_changed:
-                        # 场景切换：不使用前帧参考，改用首帧模式（仅三视图）
-                        logger.info(
-                            f"[Keyframe] 镜头 {shot_number}: 检测到场景切换，"
-                            f"跳过前帧参考，使用首帧模式"
-                        )
-                        prompt_text = build_first_shot_prompt(
-                            first_frame_description=first_frame_desc,
-                            camera_instruction=camera_instruction,
-                            hard_constraints=hard_constraints,
-                            product_analysis_summary=product_summary,
-                            product_composition_details=composition_details,
-                        )
-                        input_urls = [three_view_url] if three_view_url else None
-                    else:
-                        # 无场景切换：正常续帧模式，使用前一帧关键帧 + 三视图
-                        prompt_text = build_continuation_shot_prompt(
-                            first_frame_description=first_frame_desc,
-                            camera_instruction=camera_instruction,
-                            hard_constraints=hard_constraints,
-                            product_analysis_summary=product_summary,
-                            product_composition_details=composition_details,
-                        )
-                        input_urls = []
-                        if prev_keyframe_url:
-                            input_urls.append(prev_keyframe_url)
-                        if three_view_url:
-                            input_urls.append(three_view_url)
-                        if not input_urls:
-                            input_urls = None
+                    input_urls = list(product_ref_urls) or None
                     logger.info(
-                        f"[Keyframe] 镜头 {shot_number}: "
-                        f"{'[场景切换]首帧模式' if scene_changed else '续帧模式'}, "
-                        f"input_urls={input_urls and len(input_urls) or 0}个"
+                        f"[Keyframe] 镜头 {shot_number}: 锚定模式({anchor_reason}), "
+                        f"产品参考图={len(product_ref_urls)}张"
+                    )
+                else:
+                    # 续帧模式：产品参考图在前（形态唯一依据）、前帧最后（只管场景连贯）。
+                    # 图生图模型对前排图片注意力更强，产品锚点前置可减轻
+                    # "抄前帧里已变形产品"导致的逐帧漂移。
+                    prompt_text = build_continuation_shot_prompt(
+                        first_frame_description=first_frame_desc,
+                        camera_instruction=camera_instruction,
+                        hard_constraints=hard_constraints,
+                        product_analysis_summary=product_summary,
+                        product_composition_details=composition_details,
+                        product_ref_count=len(product_ref_urls),
+                    )
+                    input_urls = list(product_ref_urls) + [prev_keyframe_url]
+                    logger.info(
+                        f"[Keyframe] 镜头 {shot_number}: 续帧模式, "
+                        f"产品参考图={len(product_ref_urls)}张 + 前帧1张"
                     )
 
-                # 调用图片生成
+                # ---- 生成 + 审查（审查驳回自动重新生成，最多 max_attempts 次）----
                 # 有参考图时使用配置的 image-to-image 模型；无参考图时传 None 让服务自动选 text-to-image
                 model_override = (settings.KEYFRAME_IMAGE_MODEL or None) if input_urls else None
-                result_urls = await image_gen.generate_and_wait(
-                    prompt=prompt_text,
-                    input_urls=input_urls,
-                    model=model_override,
-                    poll_interval=5.0,
-                    timeout=300.0,
-                )
+                audit_enabled = getattr(settings, "ENABLE_AUDIT_KEYFRAME", True)
+                oss_url: Optional[str] = None
+                audit_result = None
 
-                if not result_urls:
-                    raise RuntimeError(f"镜头 {shot_number} 图片生成返回空结果")
-
-                generated_image_url = result_urls[0]
-                logger.info(f"[Keyframe] 镜头 {shot_number} 图片生成完成: {generated_image_url[:60]}...")
-
-                # 下载图片
-                image_bytes = await _download_image(generated_image_url)
-                logger.info(f"[Keyframe] 镜头 {shot_number} 图片已下载, 大小: {len(image_bytes)} bytes")
-
-                # 9:16 标准化
-                standardized_bytes = standardize_image_to_9_16(image_bytes)
-                logger.info(f"[Keyframe] 镜头 {shot_number} 已标准化为 9:16, 大小: {len(standardized_bytes)} bytes")
-
-                # 保存到临时文件
-                tmp_dir = os.path.join(os.path.dirname(__file__), "..", "tmp")
-                os.makedirs(tmp_dir, exist_ok=True)
-                tmp_path = os.path.join(tmp_dir, f"keyframe_{project_id}_shot{shot_number}_{os.urandom(4).hex()}.png")
-
-                try:
-                    with open(tmp_path, "wb") as f:
-                        f.write(standardized_bytes)
-
-                    # 上传到 OSS
-                    oss_key = f"keyframes/{project_id}/shot_{shot_number}.png"
-                    oss_url = await oss_service.upload_file(
-                        local_path=tmp_path,
-                        oss_key=oss_key,
-                        content_type="image/png",
-                        expires=86400 * 7,  # 7 天有效期
+                for attempt in range(1, max_attempts + 1):
+                    if attempt > 1:
+                        logger.info(
+                            f"[Keyframe] 镜头 {shot_number} 第 {attempt}/{max_attempts} 次生成"
+                            f"（上次审查驳回，自动重试）"
+                        )
+                    result_urls = await image_gen.generate_and_wait(
+                        prompt=prompt_text,
+                        input_urls=input_urls,
+                        model=model_override,
+                        poll_interval=5.0,
+                        timeout=300.0,
                     )
-                    logger.info(f"[Keyframe] 镜头 {shot_number} 已上传 OSS: {oss_key}")
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
 
-                # 更新 Airtable
-                await airtable.update_shot_keyframe(
-                    shot_id=shot_id,
-                    keyframe_image_url=oss_url,
-                )
-                logger.info(f"[Keyframe] 镜头 {shot_number} Airtable 关键帧字段已更新")
+                    if not result_urls:
+                        raise RuntimeError(f"镜头 {shot_number} 图片生成返回空结果")
 
-                # ---- 模型审查点 3.5：关键帧与参考图一致性审查 ----
-                if getattr(settings, "ENABLE_AUDIT_KEYFRAME", True):
+                    generated_image_url = result_urls[0]
+                    logger.info(f"[Keyframe] 镜头 {shot_number} 图片生成完成: {generated_image_url[:60]}...")
+
+                    # 下载图片
+                    image_bytes = await _download_image(generated_image_url)
+                    logger.info(f"[Keyframe] 镜头 {shot_number} 图片已下载, 大小: {len(image_bytes)} bytes")
+
+                    # 9:16 标准化
+                    standardized_bytes = standardize_image_to_9_16(image_bytes)
+                    logger.info(f"[Keyframe] 镜头 {shot_number} 已标准化为 9:16, 大小: {len(standardized_bytes)} bytes")
+
+                    # 保存到临时文件
+                    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "tmp")
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    tmp_path = os.path.join(tmp_dir, f"keyframe_{project_id}_shot{shot_number}_{os.urandom(4).hex()}.png")
+
+                    try:
+                        with open(tmp_path, "wb") as f:
+                            f.write(standardized_bytes)
+
+                        # 上传到 OSS（重试时覆盖同一 key，始终保留最新一版）
+                        oss_key = f"keyframes/{project_id}/shot_{shot_number}.png"
+                        oss_url = await oss_service.upload_file(
+                            local_path=tmp_path,
+                            oss_key=oss_key,
+                            content_type="image/png",
+                            expires=86400 * 7,  # 7 天有效期
+                        )
+                        logger.info(f"[Keyframe] 镜头 {shot_number} 已上传 OSS: {oss_key}")
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+
+                    # 更新 Airtable
+                    await airtable.update_shot_keyframe(
+                        shot_id=shot_id,
+                        keyframe_image_url=oss_url,
+                    )
+                    logger.info(f"[Keyframe] 镜头 {shot_number} Airtable 关键帧字段已更新")
+
+                    # ---- 模型审查点 3.5：关键帧与参考图一致性审查（级联 L1→L2）----
+                    if not audit_enabled:
+                        audit_result = None
+                        break
+
                     try:
                         audit_svc = AuditService()
                         audit_svc.set_context(
                             project_id=project_id,
                             stage=f"3.5/shot_{shot_number}",
                         )
-                        reference_urls: list[str] = []
-                        if three_view_url:
-                            reference_urls.append(three_view_url)
-                        audit_result = await audit_svc.audit_keyframe(
+                        # 审核基准与生成锚点共用同一套产品参考图（真图优先）。
+                        # 续帧模式额外附上场景锚定帧：让审核模型直接对比
+                        # "待审帧 vs 场景起点帧"，识别逐帧独立对比看不出的累积漂移
+                        reference_urls: list[str] = list(product_ref_urls)
+                        if (
+                            not anchor_mode
+                            and scene_anchor_url
+                            and scene_anchor_url not in reference_urls
+                        ):
+                            reference_urls.append(scene_anchor_url)
+                        audit_result = await audit_svc.audit_keyframe_cascade(
                             project_id=project_id,
                             shot_number=shot_number,
                             first_frame_description=first_frame_desc,
@@ -657,31 +718,25 @@ async def run_stage3_5(project_id: str) -> dict:
                                 shot_id=shot_id,
                                 status=audit_status,
                                 review_comment=audit_result.to_review_comment(),
+                                attempt=attempt,
                             )
                         except Exception as write_err:
                             logger.warning(
                                 f"[Keyframe] 镜头 {shot_number} 审查状态写回失败: {write_err}"
                             )
-                        if audit_result.should_block:
-                            logger.warning(
-                                f"[Keyframe] 镜头 {shot_number} 模型审查未通过: "
-                                f"confidence={audit_result.confidence:.2f}, "
-                                f"issues={audit_result.critical_issues}"
+                        if not audit_result.should_block:
+                            logger.info(
+                                f"[Keyframe] 镜头 {shot_number} 模型审查通过: "
+                                f"confidence={audit_result.confidence:.2f} (attempt {attempt})"
                             )
-                            failed_count += 1
-                            # 不更新 prev_keyframe_url，避免污染后续参考
-                            results.append({
-                                "shot_id": shot_id,
-                                "shot_number": shot_number,
-                                "status": "audit_rejected",
-                                "keyframe_url": oss_url,
-                                "audit_result": audit_result.model_dump(),
-                            })
-                            continue
-                        logger.info(
-                            f"[Keyframe] 镜头 {shot_number} 模型审查通过: "
-                            f"confidence={audit_result.confidence:.2f}"
+                            break
+                        logger.warning(
+                            f"[Keyframe] 镜头 {shot_number} 模型审查未通过 "
+                            f"(attempt {attempt}/{max_attempts}): "
+                            f"confidence={audit_result.confidence:.2f}, "
+                            f"issues={audit_result.critical_issues}"
                         )
+                        # 未达重试上限则回到循环顶部重新生成
                     except AuditFailedException:
                         raise
                     except Exception as audit_err:
@@ -689,10 +744,31 @@ async def run_stage3_5(project_id: str) -> dict:
                         logger.warning(
                             f"[Keyframe] 镜头 {shot_number} 审查过程异常（不阻断）: {audit_err}"
                         )
+                        audit_result = None
+                        break
 
-                # 记录当前帧作为后续帧的参考
+                # 重试耗尽仍被驳回：标记 audit_rejected，转人审
+                if audit_result is not None and audit_result.should_block:
+                    failed_count += 1
+                    # 不更新 prev_keyframe_url / scene_anchor_url，避免污染后续参考
+                    results.append({
+                        "shot_id": shot_id,
+                        "shot_number": shot_number,
+                        "status": "audit_rejected",
+                        "keyframe_url": oss_url,
+                        "attempts": max_attempts,
+                        "audit_result": audit_result.model_dump(),
+                    })
+                    continue
+
+                # 记录当前帧作为后续帧的参考，并维护抗漂移状态
                 prev_keyframe_url = oss_url
                 prev_shot_desc = first_frame_desc
+                if anchor_mode:
+                    scene_anchor_url = oss_url
+                    frames_since_anchor = 0
+                else:
+                    frames_since_anchor += 1
                 successful_count += 1
                 results.append({
                     "shot_id": shot_id,

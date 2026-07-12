@@ -101,6 +101,7 @@ class WorkflowWorker:
                     project_id=payload["project_id"],
                     video_url=payload["video_url"],
                     product_image_url=payload["product_image_url"],
+                    product_image_urls=payload.get("product_image_urls"),
                     mode=payload["mode"],
                     product_listing_url=payload.get("product_listing_url"),
                     replicate_hook=payload.get("replicate_hook"),

@@ -392,3 +392,73 @@ textarea:focus {
   border-radius: var(--radius);
   background: #000;
 }
+
+/* ---- 新建项目表单 ---- */
+.new-project-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 640px;
+}
+.new-project-form select {
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  width: 100%;
+  color: var(--text);
+  background: var(--card);
+}
+.asset-input {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.asset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.asset-label {
+  font-weight: 500;
+}
+.required-mark {
+  color: var(--red);
+}
+.asset-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.mode-switch button {
+  border: none;
+  border-radius: 0;
+  padding: 4px 12px;
+  font-size: 12px;
+  background: var(--card);
+}
+.mode-switch button.active {
+  background: var(--primary);
+  color: #fff;
+}
+.file-drop {
+  display: block;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.file-drop:hover {
+  border-color: var(--primary);
+}
+.file-drop .placeholder {
+  color: var(--text-dim);
+}

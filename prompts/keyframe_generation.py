@@ -49,15 +49,48 @@ def _sanitize_description(desc: str) -> str:
     return desc
 
 
+def _build_product_reference_block(product_ref_count: int) -> str:
+    """
+    根据产品参考图数量生成 [Product Reference] 段落。
+
+    Args:
+        product_ref_count: 附带的产品参考图数量。
+            0 = 纯文生图（无参考图段落）；
+            1 = 单张参考图（三视图或商品主图）；
+            >1 = 多张真实照片（多角度），需明确告知模型它们是同一产品。
+
+    Returns:
+        Product Reference 段落字符串（0 张时返回空串）
+    """
+    if product_ref_count <= 0:
+        return ""
+    if product_ref_count == 1:
+        return (
+            "[Product Reference]: The attached image shows the product (it may contain multiple angles).\n"
+            "The product in the generated image MUST exactly match this reference in shape, color, texture, and proportions.\n"
+            "\n"
+        )
+    return (
+        f"[Product Reference]: The first {product_ref_count} attached images are REAL photos of the SAME product "
+        "from different angles. Treat them as ground truth for the product's geometry, colors, materials, "
+        "proportions and component structure.\n"
+        "The product in the generated image MUST exactly match these reference photos.\n"
+        "\n"
+    )
+
+
 def build_first_shot_prompt(
     first_frame_description: str,
     camera_instruction: str,
     hard_constraints: str,
     product_analysis_summary: str,
     product_composition_details: str = "",
+    product_ref_count: int = 1,
+    previous_scene_hint: str = "",
 ) -> str:
     """
-    构建首帧关键帧生成 prompt（Shot 1，input_urls 仅含三视图）
+    构建锚定模式关键帧生成 prompt（Shot 1 / 场景切换 / 周期性重锚定，
+    input_urls 仅含产品参考图：多角度真实照片或三视图）
 
     Args:
         first_frame_description: 首帧场景描述
@@ -65,6 +98,9 @@ def build_first_shot_prompt(
         hard_constraints: 硬约束条件，为空时省略该段落
         product_analysis_summary: 产品物理属性摘要（layer1 + layer2）
         product_composition_details: 产品组件分解信息（多组件产品时提供）
+        product_ref_count: 附带的产品参考图数量（0=纯文生图）
+        previous_scene_hint: 上一镜头场景的文字描述。周期性重锚定时不带前帧图片，
+            改用文字提示保持场景连贯（图片会传播产品形变误差，文字不会）
 
     Returns:
         格式化后的 prompt 字符串
@@ -96,16 +132,23 @@ def build_first_shot_prompt(
             f"\nComponent Details:\n{product_composition_details}\n"
         )
 
+    scene_continuity_block = ""
+    if previous_scene_hint:
+        scene_continuity_block = (
+            "\n[Scene Continuity]: This shot continues the same scene as the previous shot, described as: "
+            f"{_sanitize_description(previous_scene_hint)}\n"
+            "Keep the environment, lighting and overall setting consistent with that description.\n"
+        )
+
     return (
         "Generate a photorealistic 9:16 portrait photograph.\n"
         "The image MUST be in 9:16 vertical/portrait aspect ratio (width < height).\n"
         "\n"
-        "[Product Reference]: The attached image shows the product from multiple angles.\n"
-        "The product in the generated image MUST exactly match this reference in shape, color, texture, and proportions.\n"
-        "\n"
+        f"{_build_product_reference_block(product_ref_count)}"
         f"[Scene Description]: {_sanitize_description(first_frame_description)}\n"
         f"[Camera]: {camera_instruction}\n"
         f"{constraints_block}"
+        f"{scene_continuity_block}"
         f"\n[Product Physical Properties]: {_sanitize_description(product_analysis_summary)}\n"
         f"{composition_block}"
         "\n"
@@ -126,9 +169,18 @@ def build_continuation_shot_prompt(
     hard_constraints: str,
     product_analysis_summary: str,
     product_composition_details: str = "",
+    product_ref_count: int = 1,
 ) -> str:
     """
-    构建后续帧关键帧生成 prompt（Shot N，input_urls 含前序关键帧 + 三视图）
+    构建续帧模式关键帧生成 prompt。
+
+    图片顺序约定（与 Stage 3.5 的 input_urls 拼装保持一致）：
+        前 N 张 = 产品参考图（多角度真实照片或三视图）——产品形态唯一依据
+        最后 1 张 = 前一镜头关键帧——只负责场景/光线/手势连贯
+
+    为什么产品参考图放前面：图生图模型对前排图片的注意力更强。
+    旧版把前帧放第一位，导致模型优先"抄"前帧里已经轻微变形的产品，
+    误差逐帧累积（雪球效应）。产品锚点前置 + 明确分工可显著减轻漂移。
 
     Args:
         first_frame_description: 当前镜头的首帧场景描述
@@ -136,6 +188,7 @@ def build_continuation_shot_prompt(
         hard_constraints: 硬约束条件，为空时省略该段落
         product_analysis_summary: 产品物理属性摘要（layer1 + layer2）
         product_composition_details: 产品组件分解信息（多组件产品时提供）
+        product_ref_count: 前置的产品参考图数量（不含最后一张前帧）
 
     Returns:
         格式化后的 prompt 字符串
@@ -167,15 +220,43 @@ def build_continuation_shot_prompt(
             f"\nComponent Details:\n{product_composition_details}\n"
         )
     
+    if product_ref_count > 1:
+        product_ref_block = (
+            f"[Product Reference]: The first {product_ref_count} attached images are REAL photos of the SAME product "
+            "from different angles. They are the ONLY source of truth for the product's geometry, colors, "
+            "materials, proportions and component structure.\n"
+            "The product in the generated image MUST exactly match these reference images.\n"
+            "\n"
+        )
+        rederive_line = (
+            "Always re-derive the product's shape and colors from the product reference images above.\n"
+        )
+    elif product_ref_count == 1:
+        product_ref_block = (
+            "[Product Reference]: The first attached image shows the product (it may contain multiple angles). "
+            "It is the ONLY source of truth for the product's geometry, colors, materials and proportions.\n"
+            "The product in the generated image MUST exactly match this reference image.\n"
+            "\n"
+        )
+        rederive_line = (
+            "Always re-derive the product's shape and colors from the product reference image above.\n"
+        )
+    else:
+        # 无产品参考图（降级场景）：只能依赖文字描述约束产品形态
+        product_ref_block = ""
+        rederive_line = (
+            "Re-derive the product's shape and colors from the Product Physical Properties described below.\n"
+        )
+
     return (
         "Generate a photorealistic 9:16 portrait photograph that naturally continues from the previous scene.\n"
         "The image MUST be in 9:16 vertical/portrait aspect ratio (width < height).\n"
         "\n"
-        "[Previous Frame]: The first attached image shows the previous shot's scene.\n"
-        "Maintain the SAME environment, lighting, and person/hand position continuity.\n"
-        "\n"
-        "[Product Reference]: The second attached image shows the product from multiple angles.\n"
-        "The product MUST exactly match this reference.\n"
+        f"{product_ref_block}"
+        "[Previous Frame]: The LAST attached image shows the previous shot's scene.\n"
+        "Use it ONLY for environment, lighting, camera framing and person/hand position continuity.\n"
+        "Do NOT copy the product's appearance from the previous frame — it may contain slight distortions.\n"
+        f"{rederive_line}"
         "\n"
         f"[Scene Description]: {_sanitize_description(first_frame_description)}\n"
         f"[Camera]: {camera_instruction}\n"

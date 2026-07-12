@@ -26,8 +26,11 @@ export function saveSettings(base, key) {
 /** 统一请求函数：拼 URL、带 Key、抛出可读的错误信息 */
 async function request(path, options = {}) {
   const url = `${getApiBase()}${path}`;
+  // FormData（文件上传）不能手动设 Content-Type：
+  // 浏览器需要自己生成带 boundary 的 multipart 头，手动设置会导致后端解析失败
+  const isFormData = options.body instanceof FormData;
   const headers = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(getApiKey() ? { "X-API-Key": getApiKey() } : {}),
     ...options.headers,
   };
@@ -53,6 +56,30 @@ async function request(path, options = {}) {
   }
   return data;
 }
+
+// ---- 素材上传 / 新建项目 ----
+
+/**
+ * 上传本地文件到后端（后端会转存 OSS 并返回公网 URL）
+ * @param kind "video" | "product_image" | "three_view"
+ * @param file 用户在 <input type="file"> 选择的 File 对象
+ * @returns {Promise<{url: string}>}
+ */
+export const uploadAsset = (kind, file) => {
+  const form = new FormData();
+  form.append("file", file);
+  return request(`/api/v1/upload-asset?kind=${encodeURIComponent(kind)}`, {
+    method: "POST",
+    body: form,
+  });
+};
+
+/** 启动复刻工作流（payload 对应后端 StartWorkflowRequest） */
+export const startWorkflow = (payload) =>
+  request("/api/v1/start-workflow", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 
 // ---- 项目 ----
 export const fetchProjects = () => request("/api/v1/projects");

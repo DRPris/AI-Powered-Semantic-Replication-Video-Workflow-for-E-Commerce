@@ -77,8 +77,14 @@ async def run_full_workflow(
     product_listing_url: str | None,
     replicate_hook: bool | None,
     update_job: JobUpdate,
+    product_image_urls: list[str] | None = None,
 ) -> None:
-    """Run stages 1-5 and persist progress through the supplied job adapter."""
+    """Run stages 1-5 and persist progress through the supplied job adapter.
+
+    Args:
+        product_image_urls: 商品多角度真实照片列表（含主图）。
+            ≥2 张时 Stage 1 跳过 AI 三视图生成，真图直接作为产品锚点。
+    """
     mode_value = ReplicationMode(mode)
     try:
         await update_job(status=JobStatus.PROCESSING.value, progress=0.1)
@@ -90,6 +96,7 @@ async def run_full_workflow(
             product_image_url=product_image_url,
             mode=mode_value,
             product_listing_url=product_listing_url,
+            product_image_urls=product_image_urls,
         )
         await update_job(status=JobStatus.PROCESSING.value, progress=0.25)
 

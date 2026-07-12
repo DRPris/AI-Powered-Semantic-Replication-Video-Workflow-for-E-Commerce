@@ -199,6 +199,75 @@ class AuditService:
         )
         return result
 
+    async def audit_keyframe_cascade(
+        self,
+        project_id: str,
+        shot_number: int,
+        first_frame_description: str,
+        keyframe_url: str,
+        reference_image_urls: list[str],
+    ) -> AuditResult:
+        """
+        级联关键帧审查：L1 Qwen-VL 快筛 → （仅在 L1 判定阻断时）L2 Gemini 精审复核。
+
+        为什么要级联：Qwen-VL 便宜快速但对细微几何差异分辨力有限，
+        单模型直接阻断会有误杀（浪费重试费用）也会有漏放（漂移帧过审）。
+        L1 放行则直接放行（省钱）；L1 阻断时用视觉能力更强的 Gemini 复核，
+        以 L2 结论为准——既减少误杀，又让真问题被更强模型确认。
+
+        ENABLE_CASCADE_AUDIT=False 时退化为单模型 audit_keyframe。
+        L2 调用失败时保守起见维持 L1 的阻断结论。
+        """
+        l1 = await self.audit_keyframe(
+            project_id=project_id,
+            shot_number=shot_number,
+            first_frame_description=first_frame_description,
+            keyframe_url=keyframe_url,
+            reference_image_urls=reference_image_urls,
+        )
+        if not getattr(settings, "ENABLE_CASCADE_AUDIT", False):
+            return l1
+        if not l1.should_block:
+            return l1
+
+        # L1 判定阻断 → 升级 L2 Gemini 精审
+        from prompts.keyframe_audit import format_keyframe_audit_prompt
+        from services.gemini_service import GeminiService
+
+        logger.info(
+            f"[{project_id}] audit_keyframe shot={shot_number}: L1 阻断"
+            f"(confidence={l1.confidence:.2f})，升级 L2 Gemini 精审"
+        )
+        prompt = format_keyframe_audit_prompt(
+            shot_number=shot_number,
+            first_frame_description=first_frame_description or "",
+        )
+        image_urls = [u for u in (reference_image_urls or []) if u] + [keyframe_url]
+        gemini = GeminiService()
+        gemini.set_context(project_id, f"stage3_5_audit_keyframe_l2/shot_{shot_number}")
+        try:
+            data = await gemini.audit_keyframe_images(
+                image_urls=image_urls,
+                prompt=prompt,
+                context="stage3_5_keyframe_audit_l2",
+            )
+            l2 = AuditResult(**data)
+        except Exception as e:
+            logger.warning(
+                f"[{project_id}] L2 Gemini 精审异常，维持 L1 阻断结论: {e}"
+            )
+            return l1
+        finally:
+            await gemini.close()
+
+        # L2 自身调用失败会返回 passed=False/confidence=0.0（转人审），同样维持阻断
+        logger.info(
+            f"[{project_id}] audit_keyframe shot={shot_number} L2 结论: "
+            f"passed={l2.passed}, confidence={l2.confidence:.2f}, "
+            f"criticals={len(l2.critical_issues)}（以 L2 为准）"
+        )
+        return l2
+
     # ------------------------------------------------------------------
     # 4.4 生成视频抽帧审查
     # ------------------------------------------------------------------

@@ -338,7 +338,8 @@ async def run_stage1(
     video_url: str,
     product_image_url: str,
     mode: "ReplicationMode" = "full",
-    product_listing_url: str = None
+    product_listing_url: str = None,
+    product_image_urls: list = None,
 ) -> dict:
     """
     阶段一：素材准备
@@ -346,9 +347,12 @@ async def run_stage1(
     Args:
         project_id: 项目 ID
         video_url: 原始视频 URL
-        product_image_url: 商品图片 URL
+        product_image_url: 商品图片 URL（主图）
         mode: 复刻模式，simple 或 full
         product_listing_url: 商品详情页链接（可选），用于提取卖点和产品形态信息
+        product_image_urls: 商品多角度真实照片 URL 列表（可选，含主图）。
+            ≥2 张时跳过 AI 三视图生成——真实照片没有幻觉，
+            直接作为下游关键帧生成/审核的产品形态锚点更可靠。
 
     Returns:
         阶段执行结果
@@ -682,11 +686,35 @@ async def run_stage1(
                     logger.info(f"[{project_id}] 发现用户上传的三视图，跳过 Gemini 生成")
                     break
 
+            # 用户上传的多角度真实照片（可能来自 start-workflow 的 product_image 素材，
+            # 也可能通过参数直接传入）。≥2 张时跳过 AI 三视图生成。
+            real_product_images = list(product_image_urls or [])
+            if len(real_product_images) < 2:
+                for asset in existing_assets:
+                    af = asset.get("fields", {})
+                    if af.get("素材类型", "") == "product_image":
+                        attachments = af.get("附件", [])
+                        if attachments:
+                            url = attachments[0].get("url", "")
+                            if url and url not in real_product_images:
+                                real_product_images.append(url)
+
             three_views = []
+            skip_three_view_generation = False
             if has_three_views and user_uploaded_three_view_url:
                 # 使用用户上传的三视图
                 three_views = [user_uploaded_three_view_url]
                 logger.info(f"[{project_id}] 使用用户上传的三视图: {user_uploaded_three_view_url}")
+            elif len(real_product_images) >= 2:
+                # 多张真实商品照片可用：跳过 AI 三视图生成。
+                # AI 三视图从单图脑补侧面/顶面（必有幻觉），而多角度真图零幻觉，
+                # 是严格更优的产品锚点。下游 Stage 3.5 会直接读 product_image 素材。
+                skip_three_view_generation = True
+                three_views = real_product_images
+                logger.info(
+                    f"[{project_id}] 检测到 {len(real_product_images)} 张商品真实照片，"
+                    f"跳过 AI 三视图生成，真图直接作为产品锚点"
+                )
             else:
                 # 三视图生成 - 使用 try/except 包裹，失败不阻塞工作流
                 # 先将产品分析结果转换为文本描述，用于指导三视图生成
@@ -768,8 +796,9 @@ async def run_stage1(
                 except Exception as e:
                     logger.warning(f"Failed to save rhythm analysis asset (non-blocking): {e}")
 
-            # 保存三视图作为独立素材（仅当不是用户上传时才创建）
-            if not has_three_views:
+            # 保存三视图作为独立素材（仅当确实执行了 AI 生成时才创建；
+            # 用户上传三视图或多图跳过生成时，素材记录已存在，无需重复创建）
+            if not has_three_views and not skip_three_view_generation:
                 # 初始化 OSS 服务用于上传 base64 图片
                 oss_service = OSSService(
                     access_key_id=settings.OSS_ACCESS_KEY_ID,
@@ -825,7 +854,8 @@ async def run_stage1(
                 three_views = uploaded_view_urls
                 logger.info(f"Three-view assets created for project {project_id} with type 'three_view'")
             else:
-                logger.info(f"[{project_id}] 使用用户上传的三视图，跳过创建新的三视图素材记录")
+                reason = "商品多图直接作锚点" if skip_three_view_generation else "使用用户上传的三视图"
+                logger.info(f"[{project_id}] {reason}，跳过创建新的三视图素材记录")
 
             # 更新项目状态为脚本生成中
             await airtable.update_project_status(

@@ -5,9 +5,10 @@ Video Replication Service - FastAPI 入口
 提供视频分析、脚本生成、提示词转换、视频生成、视频合成等 API
 """
 
+import json
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 import httpx
 
 # 加载 .env 到 os.environ（确保代理变量等被 httpx 读取）
@@ -79,19 +80,53 @@ class StartWorkflowRequest(BaseModel):
     project_id: str = Field(..., description="项目ID")
     project_name: str = Field(default="", description="项目名称（可选）")
     video_url: str = Field(..., description="原始视频URL")
-    product_image_url: str = Field(..., description="商品图片URL")
+    product_image_url: Optional[str] = Field(
+        default=None,
+        description="商品图片URL（单图，向后兼容字段；与 product_image_urls 至少提供一个）",
+    )
+    product_image_urls: Optional[list[str]] = Field(
+        default=None,
+        description="商品多角度真实照片 URL 列表（推荐 2~4 张）。提供 ≥2 张时将直接作为产品锚点，跳过 AI 三视图生成",
+    )
     mode: ReplicationMode = Field(default=ReplicationMode.FULL, description="复刻模式：simple 或 full")
     three_view_image_url: Optional[str] = Field(default=None, description="用户提供的三视图拼合图 URL")
     product_listing_url: Optional[str] = Field(default=None, description="商品详情页链接，用于提取卖点和产品形态信息")
     replicate_hook: Optional[bool] = Field(default=None, description="是否复刻 hook 镜头。True=复刻，False=跳过，None=自动检测后询问")
 
+    # 多图数量上限：过多参考图会稀释图生图注意力，且增加下载/审核成本
+    MAX_PRODUCT_IMAGES: ClassVar[int] = 5
+
     @model_validator(mode="after")
     def validate_remote_inputs(self) -> "StartWorkflowRequest":
         try:
             self.video_url = validate_public_http_url(self.video_url, "video_url")
-            self.product_image_url = validate_public_http_url(
-                self.product_image_url, "product_image_url"
-            )
+
+            # 归一化多图列表：去空、去重（保序）、限量
+            urls: list[str] = []
+            for u in self.product_image_urls or []:
+                u = (u or "").strip()
+                if u and u not in urls:
+                    urls.append(validate_public_http_url(u, "product_image_urls"))
+            if len(urls) > self.MAX_PRODUCT_IMAGES:
+                raise ValueError(
+                    f"product_image_urls 最多支持 {self.MAX_PRODUCT_IMAGES} 张，收到 {len(urls)} 张"
+                )
+
+            if self.product_image_url:
+                self.product_image_url = validate_public_http_url(
+                    self.product_image_url, "product_image_url"
+                )
+                # 单图字段并入多图列表首位，后续统一以列表消费
+                if self.product_image_url not in urls:
+                    urls.insert(0, self.product_image_url)
+
+            if not urls:
+                raise ValueError("product_image_url 与 product_image_urls 至少需要提供一个商品图")
+
+            self.product_image_urls = urls
+            # 保证单图字段始终有值（= 主图），向后兼容所有旧消费方
+            self.product_image_url = urls[0]
+
             if self.three_view_image_url:
                 self.three_view_image_url = validate_public_http_url(
                     self.three_view_image_url, "three_view_image_url"
@@ -299,6 +334,98 @@ async def confirm_product_brief(project_id: str, request: ConfirmBriefRequest):
 
 
 # ============================================================================
+# 素材文件上传 API（供网页控制台上传本地文件，换取公网 URL）
+# ============================================================================
+
+# 各类素材允许的 MIME 前缀与大小上限
+_UPLOAD_RULES = {
+    "video": {"mime_prefixes": ("video/",), "max_mb": 300},
+    "product_image": {"mime_prefixes": ("image/",), "max_mb": 20},
+    "three_view": {"mime_prefixes": ("image/",), "max_mb": 20},
+}
+
+
+@app.post("/api/v1/upload-asset")
+async def upload_asset(
+    kind: str = Query(..., description="素材类型：video / product_image / three_view"),
+    file: UploadFile = File(..., description="本地文件（视频或图片）"),
+):
+    """
+    上传本地素材文件到 OSS，返回可用于 start-workflow 的公网 URL。
+
+    为什么需要这个接口：start-workflow 只接受公网 URL（后续各阶段都要
+    反复拉取素材），本地文件必须先落到对象存储换取 URL。
+    """
+    import uuid as _uuid
+    import tempfile
+    import os as _os
+
+    rule = _UPLOAD_RULES.get(kind)
+    if rule is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind 仅支持: {', '.join(_UPLOAD_RULES)}，收到: {kind}",
+        )
+
+    content_type = file.content_type or ""
+    if not any(content_type.startswith(p) for p in rule["mime_prefixes"]):
+        expect = "视频" if kind == "video" else "图片"
+        raise HTTPException(
+            status_code=415,
+            detail=f"kind={kind} 需要{expect}文件，收到: {content_type or '未知类型'}",
+        )
+
+    # 扩展名优先取自文件名，兜底从 MIME 推断
+    ext = Path(file.filename or "").suffix.lstrip(".").lower()
+    if not ext:
+        ext = content_type.split("/")[-1] or "bin"
+
+    max_bytes = rule["max_mb"] * 1024 * 1024
+    # 分块写入临时文件，避免大视频一次性读进内存
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
+            tmp_path = tmp.name
+            total = 0
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件超过 {rule['max_mb']}MB 上限",
+                    )
+                tmp.write(chunk)
+
+        if total == 0:
+            raise HTTPException(status_code=400, detail="上传的文件为空")
+
+        oss_key = f"user_uploads/{kind}/{_uuid.uuid4().hex}.{ext}"
+        url = await oss_service.upload_file(
+            local_path=tmp_path,
+            oss_key=oss_key,
+            content_type=content_type,
+            expires=86400 * 7,  # 7 天有效，与三视图上传保持一致
+        )
+        logger.info(f"用户素材已上传 OSS: kind={kind}, key={oss_key}, size={total}B")
+        return {"url": url, "oss_key": oss_key, "size": total, "kind": kind}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"素材上传失败: kind={kind}, file={file.filename}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+    finally:
+        if tmp_path:
+            try:
+                _os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+# ============================================================================
 # 工作流一键启动 API
 # ============================================================================
 
@@ -339,6 +466,28 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
             mode=request.mode.value if hasattr(request.mode, 'value') else str(request.mode),
         )
         project_id = project["id"]
+
+        # 为每张商品真实照片创建独立素材记录（类型 product_image）。
+        # Stage 3.5 关键帧生成与审核会优先读取这些真图作为产品形态锚点，
+        # 优先级高于 AI 生成的三视图（真图无幻觉，锚点更可靠）。
+        for i, img_url in enumerate(request.product_image_urls or []):
+            try:
+                await airtable_service.create_asset(
+                    project_id=project_id,
+                    asset_type="product_image",
+                    attachment_url=img_url,
+                    content=json.dumps(
+                        {"source": "user_uploaded", "index": i},
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception as e:
+                # 素材记录失败不阻塞工作流（Stage 3.5 会退回三视图/主图兜底）
+                logger.warning(f"[{project_id}] 创建商品图素材记录失败 (index={i}): {e}")
+        if request.product_image_urls:
+            logger.info(
+                f"[{project_id}] 已登记 {len(request.product_image_urls)} 张商品图素材"
+            )
 
         # 如果用户上传了三视图，下载并上传到 OSS，然后创建素材记录
         if request.three_view_image_url:
@@ -389,6 +538,7 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                         "project_id": project_id,
                         "video_url": request.video_url,
                         "product_image_url": request.product_image_url,
+                        "product_image_urls": request.product_image_urls,
                         "mode": request.mode.value,
                         "product_listing_url": request.product_listing_url,
                         "replicate_hook": request.replicate_hook,
@@ -407,6 +557,7 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                         "project_id": project_id,
                         "video_url": request.video_url,
                         "product_image_url": request.product_image_url,
+                        "product_image_urls": request.product_image_urls,
                         "mode": request.mode.value,
                         "product_listing_url": request.product_listing_url,
                         "replicate_hook": request.replicate_hook,
@@ -433,6 +584,7 @@ async def start_workflow(request: StartWorkflowRequest, background_tasks: Backgr
                 project_id=project_id,
                 video_url=request.video_url,
                 product_image_url=request.product_image_url,
+                product_image_urls=request.product_image_urls,
                 mode=request.mode,
                 product_listing_url=request.product_listing_url,
                 replicate_hook=request.replicate_hook,

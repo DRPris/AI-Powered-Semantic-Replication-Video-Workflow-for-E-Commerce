@@ -29,7 +29,8 @@ class Settings(BaseSettings):
 
     # 统一模型审查层（AuditService）
     # 4 个审查点：1.1 原视频分析 / 1.2 商品分析 / 3.5 关键帧 / 4.4 生成视频
-    AUDIT_CONFIDENCE_THRESHOLD: float = 0.80  # 统一置信度阈值，与 Stage 2 脚本验证对齐
+    # 0.85 与 AuditResult.should_block 的兜底默认值保持一致（此前 0.80/0.85 两处不一致）
+    AUDIT_CONFIDENCE_THRESHOLD: float = 0.85  # 统一置信度阈值
     ENABLE_AUDIT_STAGE1_VIDEO: bool = True   # 1.1 原视频分析审查开关
     ENABLE_AUDIT_STAGE1_PRODUCT: bool = True  # 1.2 商品分析审查开关
     ENABLE_AUDIT_KEYFRAME: bool = True       # 3.5 关键帧审查开关
@@ -37,9 +38,9 @@ class Settings(BaseSettings):
     AUDIT_VIDEO_SAMPLE_FRAMES: int = 4       # 4.4 抽帧数（首/25%/75%/尾）
 
     # 3.5 关键帧级联审查（L1 Qwen-VL 快筛 → L2 Gemini 精审 + 自动重试）
+    # 级联规则：L1 放行则直接放行；L1 判定阻断时升级 L2 Gemini 复核，以 L2 结论为准
     ENABLE_CASCADE_AUDIT: bool = True          # 是否启用级联审查；False 时退化为原单模型 audit_keyframe
-    CASCADE_CONFIDENCE_THRESHOLD: float = 0.80 # L1 confidence 低于此值且 L1 判定不一致时升级到 L2
-    MAX_KEYFRAME_ATTEMPTS: int = 3             # 单镜头关键帧最多生成+审查次数（含首次）
+    MAX_KEYFRAME_ATTEMPTS: int = 3             # 单镜头关键帧最多生成+审查次数（含首次），审查驳回自动重新生成
     GEMINI_AUDIT_MODEL: str = "gemini-2.5-pro" # L2 精审使用的 Gemini 模型（视觉理解能力更强）
 
     # Gemini 温度统一管控（三档分类）
@@ -119,6 +120,12 @@ class Settings(BaseSettings):
     # Keyframe Generation (Stage 3.5)
     KEYFRAME_IMAGE_MODEL: str = ""  # 关键帧生成使用的模型名（空=使用服务默认值，KIE: gpt-image-2-image-to-image，OpenRouter: openai/gpt-5.4-image-2）
     ENABLE_KEYFRAME_STAGE: bool = True  # 是否启用 Stage 3.5 关键帧阶段
+    # 抗漂移：同场景内连续 N 帧使用"前帧续帧模式"后，强制回到"仅产品参考图"模式重锚定，
+    # 打断"前一帧误差喂给下一帧"的累积链。0 = 关闭重锚定（保持纯链式）。
+    KEYFRAME_REANCHOR_INTERVAL: int = 2
+    # 关键帧生成时最多携带几张产品参考图（多角度真实照片优于 AI 三视图）。
+    # 续帧模式会再追加 1 张前帧参考，总输入图数 = 该值 + 1。
+    MAX_PRODUCT_REF_IMAGES: int = 3
 
     # IP-Adapter 配置（仅在 fal.ai 后端生效，用于产品身份保持）
     ENABLE_IP_ADAPTER: bool = os.getenv("ENABLE_IP_ADAPTER", "false").lower() == "true"

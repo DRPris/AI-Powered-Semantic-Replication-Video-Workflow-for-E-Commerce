@@ -32,7 +32,20 @@ export default function ProjectList() {
 
   return (
     <>
-      <h1 className="page-title">项目列表</h1>
+      <div className="row" style={{ marginBottom: 4 }}>
+        <h1 className="page-title" style={{ margin: 0 }}>
+          项目列表
+        </h1>
+        <div className="spacer" />
+        <button
+          className="primary"
+          onClick={() => {
+            window.location.hash = "/new";
+          }}
+        >
+          ➕ 新建项目
+        </button>
+      </div>
       <p className="page-sub">点击项目查看进度、分镜与审核</p>
 
       {error && <div className="error-banner">{error}</div>}
@@ -41,7 +54,7 @@ export default function ProjectList() {
         {projects === null && !error && <div className="empty">加载中…</div>}
         {projects !== null && projects.length === 0 && (
           <div className="empty">
-            还没有项目。通过 POST /api/v1/start-workflow 启动一个工作流后，这里就会出现。
+            还没有项目。点右上角「➕ 新建项目」上传素材启动一个复刻工作流。
           </div>
         )}
         {projects !== null && projects.length > 0 && (

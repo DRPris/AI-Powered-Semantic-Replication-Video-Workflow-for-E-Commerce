@@ -3,11 +3,13 @@
  *
  * 路由规则（不引入 react-router，保持零额外依赖）：
  *   #/                     → 项目列表页
+ *   #/new                  → 新建项目页（支持本地文件上传）
  *   #/projects/{projectId} → 项目详情页
  */
 import { useEffect, useState } from "react";
 import ProjectList from "./pages/ProjectList.jsx";
 import ProjectDetail from "./pages/ProjectDetail.jsx";
+import NewProject from "./pages/NewProject.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
 
 function parseHash() {
@@ -15,6 +17,9 @@ function parseHash() {
   const match = hash.match(/^\/projects\/([^/]+)/);
   if (match) {
     return { page: "detail", projectId: decodeURIComponent(match[1]) };
+  }
+  if (hash.startsWith("/new")) {
+    return { page: "new" };
   }
   return { page: "list" };
 }
@@ -48,9 +53,9 @@ export default function App() {
         <SettingsPanel onClose={() => setShowSettings(false)} />
       )}
       <main className="container">
-        {route.page === "list" ? (
-          <ProjectList />
-        ) : (
+        {route.page === "list" && <ProjectList />}
+        {route.page === "new" && <NewProject />}
+        {route.page === "detail" && (
           <ProjectDetail projectId={route.projectId} />
         )}
       </main>

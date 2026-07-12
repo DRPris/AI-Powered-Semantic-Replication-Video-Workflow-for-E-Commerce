@@ -622,19 +622,30 @@ async def run_stage4(
                         logger.info(f"Found three-view asset via content fallback")
                         break
         
-        # 如果找不到三视图，尝试使用原始产品图作为 fallback
+        # 如果找不到三视图，优先使用用户上传的商品真实照片（product_image），
+        # 再退回商品分析素材附件。多图模式下项目没有三视图素材，真图就是产品锚点。
         if not three_view_url:
-            logger.warning(f"项目 {project_id} 未找到三视图，尝试查找原始产品图作为 fallback")
+            logger.warning(f"项目 {project_id} 未找到三视图，尝试查找商品真实照片/原始产品图作为 fallback")
             for asset in assets:
                 asset_fields = asset.get("fields", {})
                 asset_type = asset_fields.get("素材类型", "").lower()
-                if asset_type == "product":
-                    # 从产品素材获取 URL
+                if asset_type == "product_image":
                     attachments = asset_fields.get("附件", [])
                     if attachments and len(attachments) > 0:
                         three_view_url = attachments[0].get("url")
-                        logger.info(f"Using product image as fallback reference: {three_view_url[:60]}...")
+                        logger.info(f"Using user product photo as reference: {three_view_url[:60]}...")
                         break
+            if not three_view_url:
+                for asset in assets:
+                    asset_fields = asset.get("fields", {})
+                    asset_type = asset_fields.get("素材类型", "").lower()
+                    if asset_type == "product":
+                        # 从产品素材获取 URL
+                        attachments = asset_fields.get("附件", [])
+                        if attachments and len(attachments) > 0:
+                            three_view_url = attachments[0].get("url")
+                            logger.info(f"Using product image as fallback reference: {three_view_url[:60]}...")
+                            break
         
         if not three_view_url:
             logger.warning(f"项目 {project_id} 未找到三视图或产品图，将不使用参考图生成")

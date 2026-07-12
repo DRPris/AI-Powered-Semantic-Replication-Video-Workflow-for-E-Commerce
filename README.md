@@ -77,8 +77,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ### 4.5 启动网页控制台（可选，推荐）
 
-`frontend/` 目录是一个轻量网页控制台，用于查看项目进度、分镜卡片墙、
-审核关键帧（通过/驳回）并一键触发视频生成：
+`frontend/` 目录是一个轻量网页控制台，用于新建项目（支持粘贴公网链接
+或直接上传本地视频/图片文件，本地文件会经后端转存 OSS）、查看项目进度、
+分镜卡片墙、审核关键帧（通过/驳回）并一键触发视频生成：
 
 ```bash
 cd frontend
@@ -107,6 +108,22 @@ curl -X POST http://localhost:8000/api/v1/start-workflow \
     "product_image_url": "https://your-bucket.oss-cn-beijing.aliyuncs.com/demo/product.jpg",
     "product_listing_url": "https://www.lazada.com.my/products/your-product-i123456.html",
     "mode": "simple"
+  }'
+```
+
+**强烈建议：上传多张不同角度的商品实拍图**（`product_image_urls`，2~5 张）。
+只传单图时系统会用 AI 从这一张图"脑补"出三视图作为产品锚点，脑补出的角度可能失真，
+是关键帧中产品逐帧变形的主要根源；传 ≥2 张真图时系统跳过 AI 三视图生成，
+直接用真图锁定产品形态（生成与审核共用同一套锚点）：
+
+```bash
+  -d '{
+    ...,
+    "product_image_urls": [
+      "https://your-bucket.oss-cn-beijing.aliyuncs.com/demo/product_front.jpg",
+      "https://your-bucket.oss-cn-beijing.aliyuncs.com/demo/product_side.jpg",
+      "https://your-bucket.oss-cn-beijing.aliyuncs.com/demo/product_top.jpg"
+    ]
   }'
 ```
 

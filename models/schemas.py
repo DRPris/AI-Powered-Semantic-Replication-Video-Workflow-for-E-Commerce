@@ -89,6 +89,10 @@ class AssetType(str, Enum):
     AUDIO = "audio"
     PRODUCT = "product"
     THREE_VIEW = "三视图"
+    # 用户上传的产品真实照片（可多张、多角度）。
+    # 与 PRODUCT（商品分析结果素材）区分：PRODUCT_IMAGE 只存图片本身，
+    # 作为关键帧生成与审核的产品形态锚点，优先级高于 AI 生成的三视图。
+    PRODUCT_IMAGE = "product_image"
 
 
 # ============================================================================
